@@ -64,7 +64,11 @@ impl CliArgs {
     pub fn print_help() {
         use std::io::Write;
         let mut out = std::io::stdout();
-        let _ = writeln!(out, "WinCare v0.1.0 — Outil tout-en-un léger de réparation et d'optimisation Windows");
+        let _ = writeln!(
+            out,
+            "WinCare v{} — Outil tout-en-un léger de réparation et d'optimisation Windows",
+            env!("CARGO_PKG_VERSION")
+        );
         let _ = writeln!(out);
         let _ = writeln!(out, "UTILISATION :");
         let _ = writeln!(out, "  win-care.exe                 Lance l'interface graphique native (GUI)");
