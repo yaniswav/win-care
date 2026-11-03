@@ -5,6 +5,7 @@ pub mod boost_net;
 pub mod boost_pc;
 pub mod cli;
 pub mod debloat;
+pub mod i18n;
 pub mod logger;
 pub mod repair;
 pub mod restore;
@@ -150,14 +151,21 @@ fn main() {
         }
     }
 
+    let lang = args.lang.unwrap_or_else(i18n::Lang::detect);
+
     if args.cli_mode {
-        run_cli_mode(&args, admin);
+        run_cli_mode(&args, admin, lang);
         return;
     }
 
+    let title = lang.tr(
+        "WinCare v0.3 — Windows Maintenance, Optimization & Debloat",
+        "WinCare v0.3 — Réparation, Optimisation & Debloat Windows",
+    );
+
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("WinCare v0.2 — Réparation, Optimisation & Debloat Windows")
+            .with_title(title)
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([880.0, 600.0])
             .with_icon(build_shield_icon()),
@@ -177,20 +185,40 @@ fn main() {
     );
 }
 
-fn run_cli_mode(args: &CliArgs, admin: bool) {
+fn run_cli_mode(args: &CliArgs, admin: bool, lang: i18n::Lang) {
     let logger = Logger::new(None, true);
-    logger.section("WINCARE v0.2 - MODE LIGNE DE COMMANDE");
-    logger.info(format!(
-        "Droits Administrateur : {} | Dry-Run : {}",
-        if admin { "OUI" } else { "NON" },
-        if args.dry_run { "OUI" } else { "NON" }
+    logger.section(lang.tr(
+        "WINCARE v0.3 - COMMAND LINE MODE",
+        "WINCARE v0.3 - MODE LIGNE DE COMMANDE",
     ));
-    logger.info(format!("Journal enregistré dans : {}", logger.log_path.display()));
+    logger.info(format!(
+        "{} : {} | {} : {}",
+        lang.tr("Administrator Privileges", "Droits Administrateur"),
+        if admin {
+            lang.tr("YES", "OUI")
+        } else {
+            lang.tr("NO", "NON")
+        },
+        lang.tr("Dry-Run", "Dry-Run"),
+        if args.dry_run {
+            lang.tr("YES", "OUI")
+        } else {
+            lang.tr("NO", "NON")
+        }
+    ));
+    logger.info(format!(
+        "{} : {}",
+        lang.tr("Log saved to", "Journal enregistré dans"),
+        logger.log_path.display()
+    ));
 
     let runner = Runner::new(logger.clone(), args.dry_run);
 
     if args.self_update {
-        logger.section("MISE A JOUR AUTOMATIQUE DEPUIS GITHUB");
+        logger.section(lang.tr(
+            "AUTOMATIC UPDATE FROM GITHUB",
+            "MISE A JOUR AUTOMATIQUE DEPUIS GITHUB",
+        ));
         if let Some(info) = updater::check_for_update(&runner) {
             if info.update_available {
                 updater::perform_self_update(&runner, &info);
@@ -200,25 +228,34 @@ fn run_cli_mode(args: &CliArgs, admin: bool) {
     }
 
     if args.diagnose_only {
-        logger.section("DIAGNOSTIC PC COMPLET");
+        logger.section(lang.tr("FULL PC DIAGNOSIS", "DIAGNOSTIC PC COMPLET"));
         let _pc = boost_pc::run_pc_diagnosis(&runner);
-        logger.section("DIAGNOSTIC INTERNET COMPLET");
+        logger.section(lang.tr("FULL INTERNET DIAGNOSIS", "DIAGNOSTIC INTERNET COMPLET"));
         let _net = boost_net::run_net_diagnosis(&runner, false);
-        logger.success("Diagnostic terminé (aucune modification appliquée).");
+        logger.success(lang.tr(
+            "Diagnosis completed (no changes applied).",
+            "Diagnostic terminé (aucune modification appliquée).",
+        ));
         return;
     }
 
     let mut need_reboot = false;
 
     if args.auto_repair {
-        logger.section("REPARATION AUTOMATIQUE WINDOWS");
+        logger.section(lang.tr(
+            "AUTOMATIC WINDOWS REPAIR",
+            "REPARATION AUTOMATIQUE WINDOWS",
+        ));
         if repair::execute_repair_tasks(&runner, &RepairTask::ALL, true) {
             need_reboot = true;
         }
     }
 
     if args.auto_boost_pc {
-        logger.section("BOOST PC AUTOMATIQUE (MODE SAFE)");
+        logger.section(lang.tr(
+            "AUTOMATIC PC BOOST (SAFE MODE)",
+            "BOOST PC AUTOMATIQUE (MODE SAFE)",
+        ));
         let before = boost_pc::run_pc_diagnosis(&runner);
         boost_pc::run_pc_cleaning(&runner, &PcCleanOptions::default());
         boost_pc::run_pc_optimizations(&runner, &PcOptimOptions::default(), &before);
@@ -226,7 +263,10 @@ fn run_cli_mode(args: &CliArgs, admin: bool) {
     }
 
     if args.auto_boost_net {
-        logger.section("BOOST INTERNET AUTOMATIQUE (MODE SAFE)");
+        logger.section(lang.tr(
+            "AUTOMATIC INTERNET BOOST (SAFE MODE)",
+            "BOOST INTERNET AUTOMATIQUE (MODE SAFE)",
+        ));
         let before = boost_net::run_net_diagnosis(&runner, false);
         if boost_net::run_net_optimizations(&runner, &NetOptimOptions::default(), &before) {
             need_reboot = true;
@@ -235,7 +275,10 @@ fn run_cli_mode(args: &CliArgs, admin: bool) {
     }
 
     if need_reboot {
-        logger.warn("IMPORTANT : Un redémarrage du PC est recommandé pour finaliser les réparations.");
+        logger.warn(lang.tr(
+            "IMPORTANT: A PC restart is recommended to finalize repairs.",
+            "IMPORTANT : Un redémarrage du PC est recommandé pour finaliser les réparations.",
+        ));
     }
-    logger.success("Opérations terminées.");
+    logger.success(lang.tr("Operations completed.", "Opérations terminées."));
 }

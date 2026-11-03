@@ -1,3 +1,4 @@
+use crate::i18n::{debloat_category_title, debloat_tweak_text, repair_task_text, Lang};
 use crate::logger::Logger;
 use crate::runner::Runner;
 use crate::types::{
@@ -19,6 +20,19 @@ pub enum ActiveTab {
     BoostNet,
     Debloat,
     Restore,
+}
+
+impl ActiveTab {
+    pub fn label(self, lang: Lang) -> &'static str {
+        match self {
+            ActiveTab::Overview => lang.tr("🏠 Overview", "🏠 Vue d'ensemble"),
+            ActiveTab::Repair => lang.tr("🛠 Windows Repair", "🛠 Réparation Windows"),
+            ActiveTab::BoostPc => lang.tr("⚡ Boost PC", "⚡ Boost PC"),
+            ActiveTab::BoostNet => lang.tr("🌐 Boost Internet", "🌐 Boost Internet"),
+            ActiveTab::Debloat => lang.tr("🧹 Debloat & Tweaks", "🧹 Debloat & Tweaks"),
+            ActiveTab::Restore => lang.tr("↩ Restore (.RESTORE)", "↩ Restauration (.RESTORE)"),
+        }
+    }
 }
 
 /// Charge la police système Windows `Segoe UI Symbol` (`seguisym.ttf`) en fallback
@@ -100,6 +114,7 @@ fn checkbox_with_help(
 pub struct WinCareApp {
     pub is_admin: bool,
     pub dry_run: bool,
+    pub lang: Lang,
     active_tab: ActiveTab,
 
     // Canal de communication avec les threads d'exécution
@@ -148,22 +163,30 @@ impl WinCareApp {
     pub fn new(ctx: &egui::Context, is_admin: bool, dry_run: bool) -> Self {
         configure_ui_and_fonts(ctx);
 
+        let lang = Lang::detect();
         let (tx, rx) = mpsc::channel();
         let init_logger = Logger::new(Some(tx.clone()), false);
         let log_file_path = init_logger.log_path.clone();
 
-        init_logger.info(
-            "WinCare v0.2.1 prêt. Survolez n'importe quelle option ou badge [?] pour afficher son infobulle détaillée.",
-        );
+        init_logger.info(match lang {
+            Lang::En => {
+                "WinCare v0.2.1 ready. Hover over any option or [?] badge to view its detailed tooltip."
+            }
+            Lang::Fr => {
+                "WinCare v0.2.1 prêt. Survolez n'importe quelle option ou badge [?] pour afficher son infobulle détaillée."
+            }
+        });
         if !is_admin {
-            init_logger.warn(
-                "Exécuté sans droits Administrateur : certaines réparations nécessitent une élévation UAC.",
-            );
+            init_logger.warn(match lang {
+                Lang::En => "Running without Administrator privileges: some repairs require UAC elevation.",
+                Lang::Fr => "Exécuté sans droits Administrateur : certaines réparations nécessitent une élévation UAC.",
+            });
         }
         if dry_run {
-            init_logger.info(
-                "Mode Simulation (--dry-run) actif : aucune modification système ne sera appliquée.",
-            );
+            init_logger.info(match lang {
+                Lang::En => "Simulation mode (--dry-run) active: no system modifications will be applied.",
+                Lang::Fr => "Mode Simulation (--dry-run) actif : aucune modification système ne sera appliquée.",
+            });
         }
 
         let mut selected_repairs = HashSet::new();
@@ -177,6 +200,7 @@ impl WinCareApp {
         Self {
             is_admin,
             dry_run,
+            lang,
             active_tab: ActiveTab::Overview,
             tx,
             rx,
@@ -253,7 +277,7 @@ impl WinCareApp {
                 }
                 WorkerEvent::TaskFinished { title, need_reboot } => {
                     self.is_busy = false;
-                    self.progress_label = format!("Terminé : {title}");
+                    self.progress_label = format!("{} {title}", self.lang.tr("Finished:", "Terminé :"));
                     if need_reboot {
                         self.need_reboot_banner = true;
                     }
@@ -630,22 +654,61 @@ impl WinCareApp {
     }
 
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
             ui.heading(
                 RichText::new("⚡ WinCare v0.2.1")
                     .strong()
                     .color(Color32::from_rgb(90, 200, 250)),
             );
-            ui.label(RichText::new("— Repair, Boost & Win11 Debloat").weak());
+            ui.label(
+                RichText::new(l.tr(
+                    "— Repair, Boost & Win11 Debloat",
+                    "— Réparation, Boost & Debloat Win11",
+                ))
+                .weak(),
+            );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.checkbox(&mut self.dry_run, "Mode Simulation (Dry-Run)")
+                // Bouton de bascule de langue bien visible
+                let lang_btn_text = match self.lang {
+                    Lang::En => "🌐 [EN] | FR",
+                    Lang::Fr => "🌐 EN | [FR]",
+                };
+                if ui
+                    .button(RichText::new(lang_btn_text).strong().color(Color32::from_rgb(110, 220, 255)))
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Mode Simulation (--dry-run)",
-                            "Quand cette case est cochée, WinCare n'effectue aucune modification sur votre PC : il affiche uniquement dans le journal en bas les commandes qui auraient été lancées.",
-                            "✔ Idéal pour tester l'outil sans rien toucher au système",
+                            l.tr("Language / Langue", "Langue / Language"),
+                            l.tr(
+                                "Click to switch interface language between English and French instantly.",
+                                "Cliquez pour basculer instantanément la langue de l'interface entre le français et l'anglais.",
+                            ),
+                            l.tr("✔ Instant switch", "✔ Bascule instantanée"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.lang = self.lang.toggle();
+                }
+
+                ui.separator();
+
+                ui.checkbox(&mut self.dry_run, l.tr("Simulation (Dry-Run)", "Mode Simulation (Dry-Run)"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Simulation Mode (--dry-run)", "Mode Simulation (--dry-run)"),
+                            l.tr(
+                                "When enabled, WinCare will not perform any changes on your system: it only logs the commands that would be executed.",
+                                "Quand cette case est cochée, WinCare n'effectue aucune modification sur votre PC : il affiche uniquement dans le journal en bas les commandes qui auraient été lancées.",
+                            ),
+                            l.tr(
+                                "✔ Ideal for safe testing without touching the system",
+                                "✔ Idéal pour tester l'outil sans rien toucher au système",
+                            ),
                             false,
                         );
                     });
@@ -655,14 +718,20 @@ impl WinCareApp {
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("★ Créer Point de Restauration"),
+                        egui::Button::new(l.tr("★ Create Restore Point", "★ Créer Point de Restauration")),
                     )
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Point de Restauration Système Windows",
-                            "Appelle Checkpoint-Computer pour créer un point de restauration officiel Windows avant vos modifications.",
-                            "✔ Recommandé avant un gros nettoyage ou debloat",
+                            l.tr("Windows System Restore Point", "Point de Restauration Système Windows"),
+                            l.tr(
+                                "Calls Checkpoint-Computer to create an official Windows restore point before applying changes.",
+                                "Appelle Checkpoint-Computer pour créer un point de restauration officiel Windows avant vos modifications.",
+                            ),
+                            l.tr(
+                                "✔ Recommended before cleaning or debloating",
+                                "✔ Recommandé avant un gros nettoyage ou debloat",
+                            ),
                             false,
                         );
                     })
@@ -684,11 +753,15 @@ impl WinCareApp {
                         .as_ref()
                         .map(|u| u.latest_version.clone())
                         .unwrap_or_default();
+                    let btn_text = match l {
+                        Lang::En => format!("⬆ Update v{ver}"),
+                        Lang::Fr => format!("⬆ Installer MAJ v{ver}"),
+                    };
                     if ui
                         .add_enabled(
                             !self.is_busy,
                             egui::Button::new(
-                                RichText::new(format!("⬆ Installer MAJ v{ver}"))
+                                RichText::new(btn_text)
                                     .color(Color32::from_rgb(90, 235, 135))
                                     .strong(),
                             ),
@@ -696,9 +769,15 @@ impl WinCareApp {
                         .on_hover_ui(|ui| {
                             show_rich_tooltip(
                                 ui,
-                                "Installer la mise à jour GitHub",
-                                "Télécharge automatiquement la nouvelle version de WinCare.exe depuis GitHub Releases, vérifie sa signature exécutable et remplace le fichier actuel.",
-                                "✔ Mise à jour officielle depuis yaniswav/win-care",
+                                l.tr("Install GitHub Update", "Installer la mise à jour GitHub"),
+                                l.tr(
+                                    "Downloads new WinCare.exe release from GitHub Releases, checks its executable signature and updates the current binary.",
+                                    "Télécharge automatiquement la nouvelle version de WinCare.exe depuis GitHub Releases, vérifie sa signature exécutable et remplace le fichier actuel.",
+                                ),
+                                l.tr(
+                                    "✔ Official release from yaniswav/win-care",
+                                    "✔ Mise à jour officielle depuis yaniswav/win-care",
+                                ),
                                 false,
                             );
                         })
@@ -707,13 +786,19 @@ impl WinCareApp {
                         self.spawn_check_update(true);
                     }
                 } else if ui
-                    .add_enabled(!self.is_busy, egui::Button::new("↻ Vérifier MAJ"))
+                    .add_enabled(!self.is_busy, egui::Button::new(l.tr("↻ Check Updates", "↻ Vérifier MAJ")))
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Vérifier les mises à jour (GitHub Releases)",
-                            "Interroge https://github.com/yaniswav/win-care/releases/latest pour savoir si une version plus récente de WinCare.exe est disponible.",
-                            "✔ Aucune donnée personnelle envoyée",
+                            l.tr("Check for Updates (GitHub Releases)", "Vérifier les mises à jour (GitHub Releases)"),
+                            l.tr(
+                                "Queries https://github.com/yaniswav/win-care/releases/latest to see if a newer version of WinCare.exe is available.",
+                                "Interroge https://github.com/yaniswav/win-care/releases/latest pour savoir si une version plus récente de WinCare.exe est disponible.",
+                            ),
+                            l.tr(
+                                "✔ No personal data is sent",
+                                "✔ Aucune donnée personnelle envoyée",
+                            ),
                             false,
                         );
                     })
@@ -726,19 +811,26 @@ impl WinCareApp {
 
                 if self.is_admin {
                     ui.label(
-                        RichText::new("✔ Administrateur")
+                        RichText::new(l.tr("✔ ADMIN (UAC)", "✔ Administrateur"))
                             .color(Color32::from_rgb(80, 220, 120))
                             .strong(),
                     )
-                    .on_hover_text("WinCare tourne avec les privilèges Administrateur complets.");
+                    .on_hover_text(l.tr(
+                        "WinCare is running with full Administrator privileges.",
+                        "WinCare tourne avec les privilèges Administrateur complets.",
+                    ));
                 } else if ui
                     .button(
-                        RichText::new("⚠ Mode Standard — Relancer en Admin")
-                            .color(Color32::from_rgb(255, 200, 70)),
+                        RichText::new(l.tr(
+                            "⚠ NON-ADMIN — Relaunch as Admin",
+                            "⚠ Mode Standard — Relancer en Admin",
+                        ))
+                        .color(Color32::from_rgb(255, 200, 70)),
                     )
-                    .on_hover_text(
+                    .on_hover_text(l.tr(
+                        "Click here to relaunch WinCare with Windows Administrator prompt (UAC), required for DISM, SFC and system repairs.",
                         "Cliquez ici pour relancer WinCare avec l'invite Administrateur Windows (UAC), requise pour DISM, SFC et le nettoyage système.",
-                    )
+                    ))
                     .clicked()
                 {
                     if crate::relaunch_as_admin() {
@@ -754,35 +846,57 @@ impl WinCareApp {
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::Overview,
-                "▶ Aperçu & Mode Auto",
+                ActiveTab::Overview.label(l),
             )
-            .on_hover_text("Vue d'ensemble et lancement en 1 clic des diagnostics ou réparations complètes.");
+            .on_hover_text(l.tr(
+                "Overview and 1-click launch for diagnostics or complete repairs.",
+                "Vue d'ensemble et lancement en 1 clic des diagnostics ou réparations complètes.",
+            ));
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::Repair,
-                "⚙ Réparation Windows",
+                ActiveTab::Repair.label(l),
             )
-            .on_hover_text("Les 8 outils de réparation système Windows (DISM, SFC, Windows Update, Réseau, Store, Services, CHKDSK).");
+            .on_hover_text(l.tr(
+                "The 8 Windows system repair tools (DISM, SFC, Windows Update, Network, Store, Services, CHKDSK).",
+                "Les 8 outils de réparation système Windows (DISM, SFC, Windows Update, Réseau, Store, Services, CHKDSK).",
+            ));
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::BoostPc,
-                "⚡ Boost PC & %TEMP%",
+                ActiveTab::BoostPc.label(l),
             )
-            .on_hover_text("Nettoyage des caches, analyseur des plus gros dossiers %TEMP%, optimisations de performance et gestion des programmes au démarrage.");
+            .on_hover_text(l.tr(
+                "Cache cleanup, top %TEMP% subfolders analyzer, performance optimizations, and startup programs management.",
+                "Nettoyage des caches, analyseur des plus gros dossiers %TEMP%, optimisations de performance et gestion des programmes au démarrage.",
+            ));
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::BoostNet,
-                "🌐 Boost Internet & DNS",
+                ActiveTab::BoostNet.label(l),
             )
-            .on_hover_text("Benchmark de vitesse des serveurs DNS (avec protection NextDNS), calcul du MTU optimal et optimisation Wi-Fi / TCP.");
+            .on_hover_text(l.tr(
+                "DNS servers speed benchmark (with NextDNS protection), optimal MTU calculation, and Wi-Fi / TCP optimization.",
+                "Benchmark de vitesse des serveurs DNS (avec protection NextDNS), calcul du MTU optimal et optimisation Wi-Fi / TCP.",
+            ));
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::Debloat,
-                "★ Debloat & Tweaks Win11",
+                ActiveTab::Debloat.label(l),
             )
-            .on_hover_text("Désactivation de Copilot, Windows Recall, Bing, Télémétrie, Widgets et activation du clic-droit classique Windows 10.");
-            ui.selectable_value(&mut self.active_tab, ActiveTab::Restore, "↻ Restauration")
-                .on_hover_text("Permet de remettre à l'état d'origine tous les réglages modifiés par Boost PC ou Boost Internet.");
+            .on_hover_text(l.tr(
+                "Disable Copilot, Windows Recall, Bing, Telemetry, Widgets, and restore classic Windows 10 context menu.",
+                "Désactivation de Copilot, Windows Recall, Bing, Télémétrie, Widgets et activation du clic-droit classique Windows 10.",
+            ));
+            ui.selectable_value(
+                &mut self.active_tab,
+                ActiveTab::Restore,
+                ActiveTab::Restore.label(l),
+            )
+            .on_hover_text(l.tr(
+                "Restore all settings changed by Boost PC or Boost Internet back to factory defaults.",
+                "Permet de remettre à l'état d'origine tous les réglages modifiés par Boost PC ou Boost Internet.",
+            ));
         });
 
         if self.is_busy || !self.progress_label.is_empty() {
@@ -805,13 +919,14 @@ impl WinCareApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(
+                    RichText::new(l.tr(
+                        "⚠ A Windows restart is recommended to complete repairs.",
                         "⚠ Un redémarrage de Windows est recommandé pour finaliser les réparations.",
-                    )
+                    ))
                     .color(Color32::from_rgb(255, 190, 60))
                     .strong(),
                 );
-                if ui.small_button("Masquer").clicked() {
+                if ui.small_button(l.tr("Dismiss", "Masquer")).clicked() {
                     self.need_reboot_banner = false;
                 }
             });
@@ -819,39 +934,52 @@ impl WinCareApp {
     }
 
     fn render_overview_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Tableau de bord & Actions rapides");
-        ui.label("💡 Astuce : Survolez n'importe quelle option ou icône [?] pour afficher instantanément son explication détaillée.");
+        let l = self.lang;
+        ui.heading(l.tr("Dashboard & Quick Actions", "Tableau de bord & Actions rapides"));
+        ui.label(l.tr(
+            "💡 Tip: Hover over any option or [?] badge to view its detailed explanation instantly.",
+            "💡 Astuce : Survolez n'importe quelle option ou icône [?] pour afficher instantanément son explication détaillée.",
+        ));
         ui.add_space(8.0);
 
         ui.columns(4, |cols| {
             cols[0].group(|ui| {
                 ui.heading(
-                    RichText::new("▶ Diagnostic Complet")
+                    RichText::new(l.tr("▶ Full Diagnosis", "▶ Diagnostic Complet"))
                         .color(Color32::from_rgb(100, 210, 255)),
                 );
-                ui.label("Analyse PC + Top dossiers %TEMP% + Connexion Internet (Route, Ping, DNS, MTU) en lecture seule.");
+                ui.label(l.tr(
+                    "Read-only scan: PC info + top %TEMP% folders + Internet connection (Route, Ping, DNS, MTU).",
+                    "Analyse PC + Top dossiers %TEMP% + Connexion Internet (Route, Ping, DNS, MTU) en lecture seule.",
+                ));
                 ui.add_space(4.0);
                 checkbox_with_help(
                     ui,
                     &mut self.include_speedtest,
-                    "Inclure Speedtest Ookla",
-                    "Test de débit Ookla Speedtest",
-                    "Si coché, exécute speedtest.exe pour mesurer votre vitesse réelle de téléchargement (Download) et d'envoi (Upload).",
-                    "ℹ Ajoute environ 25 secondes au diagnostic",
+                    l.tr("Include Ookla Speedtest", "Inclure Speedtest Ookla"),
+                    l.tr("Ookla Speedtest Bandwidth Test", "Test de débit Ookla Speedtest"),
+                    l.tr(
+                        "If checked, runs speedtest.exe to measure real Download and Upload bandwidth.",
+                        "Si coché, exécute speedtest.exe pour mesurer votre vitesse réelle de téléchargement (Download) et d'envoi (Upload).",
+                    ),
+                    l.tr("ℹ Adds ~25 seconds to diagnosis", "ℹ Ajoute environ 25 secondes au diagnostic"),
                     false,
                 );
                 ui.add_space(4.0);
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("▶ Lancer le Diagnostic Complet"),
+                        egui::Button::new(l.tr("▶ Run Full Diagnosis", "▶ Lancer le Diagnostic Complet")),
                     )
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Diagnostic Complet (100 % Lecture Seule)",
-                            "Analyse votre matériel, la RAM, le CPU, l'espace disque, les 9 dossiers de caches, les sous-dossiers les plus lourds de %TEMP%, les programmes au démarrage, le ping, les serveurs DNS et le MTU.",
-                            "✔ 100 % sans danger : ne modifie aucun fichier ni réglage",
+                            l.tr("Full Diagnosis (100% Read-Only)", "Diagnostic Complet (100 % Lecture Seule)"),
+                            l.tr(
+                                "Scans hardware, RAM, CPU, disk free space, 9 cache folders, top %TEMP% subfolders, startup programs, ping, DNS servers, and MTU.",
+                                "Analyse votre matériel, la RAM, le CPU, l'espace disque, les 9 dossiers de caches, les sous-dossiers les plus lourds de %TEMP%, les programmes au démarrage, le ping, les serveurs DNS et le MTU.",
+                            ),
+                            l.tr("✔ 100% safe: does not modify any files or settings", "✔ 100 % sans danger : ne modifie aucun fichier ni réglage"),
                             false,
                         );
                     })
@@ -866,21 +994,36 @@ impl WinCareApp {
                     RichText::new("⚙ Repair-Windows-Auto")
                         .color(Color32::from_rgb(120, 230, 140)),
                 );
-                ui.label("Exécute automatiquement les 8 réparations système (DISM, SFC, Windows Update, Réseau, Temp, Store, Services, CHKDSK).");
+                ui.label(l.tr(
+                    "Automatically runs all 8 system repairs (DISM, SFC, Windows Update, Network, Temp, Store, Services, CHKDSK).",
+                    "Exécute automatiquement les 8 réparations système (DISM, SFC, Windows Update, Réseau, Temp, Store, Services, CHKDSK).",
+                ));
                 ui.add_space(4.0);
-                ui.label(RichText::new("Streaming en direct de la progression %.").weak());
+                ui.label(RichText::new(l.tr("Live % streaming progress.", "Streaming en direct de la progression %.")).weak());
                 ui.add_space(4.0);
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("▶ Réparation Auto Complète"),
+                        egui::Button::new(l.tr("▶ Full Auto Repair", "▶ Réparation Auto Complète")),
                     )
                     .on_hover_ui(|ui| {
+                        let repair_labels: Vec<&str> = RepairTask::ALL
+                            .into_iter()
+                            .map(|t| repair_task_text(l, t).0)
+                            .collect();
+                        let details = match l {
+                            Lang::En => format!("Sequentially executes: 1. {}, 2. {}, 3. {}, 4. {}, 5. {}, 6. {}, 7. {}, 8. {}.",
+                                repair_labels[0], repair_labels[1], repair_labels[2], repair_labels[3],
+                                repair_labels[4], repair_labels[5], repair_labels[6], repair_labels[7]),
+                            Lang::Fr => format!("Enchaîne automatiquement : 1. {}, 2. {}, 3. {}, 4. {}, 5. {}, 6. {}, 7. {}, 8. {}.",
+                                repair_labels[0], repair_labels[1], repair_labels[2], repair_labels[3],
+                                repair_labels[4], repair_labels[5], repair_labels[6], repair_labels[7]),
+                        };
                         show_rich_tooltip(
                             ui,
-                            "Réparation Automatique Complète (Repair-Windows-Auto)",
-                            "Enchaîne automatiquement : 1. DISM (Check/Scan/RestoreHealth + WinSxS), 2. SFC (/scannow), 3. Réparation Windows Update, 4. Reset Réseau, 5. Nettoyage Temp, 6. Réparation Windows Store, 7. Services critiques, 8. Planification CHKDSK au prochain redémarrage.",
-                            "⚠ Dure 20 à 45 minutes (vous pouvez verrouiller le PC avec Win+L)",
+                            l.tr("Full Automatic Repair (Repair-Windows-Auto)", "Réparation Automatique Complète (Repair-Windows-Auto)"),
+                            &details,
+                            l.tr("⚠ Takes 20 to 45 minutes (you may lock PC with Win+L)", "⚠ Dure 20 à 45 minutes (vous pouvez verrouiller le PC avec Win+L)"),
                             true,
                         );
                     })
@@ -892,19 +1035,25 @@ impl WinCareApp {
 
             cols[2].group(|ui| {
                 ui.heading(
-                    RichText::new("⚡ Pack Boost Safe").color(Color32::from_rgb(255, 200, 90)),
+                    RichText::new(l.tr("⚡ Safe Boost Pack", "⚡ Pack Boost Safe")).color(Color32::from_rgb(255, 200, 90)),
                 );
-                ui.label("Nettoyage sécurisé (%TEMP%, caches) et optimisations recommandées PC + Internet avec diff Avant/Après.");
+                ui.label(l.tr(
+                    "Safe cleanup (%TEMP%, caches) and recommended PC + Internet optimizations with Before/After diff.",
+                    "Nettoyage sécurisé (%TEMP%, caches) et optimisations recommandées PC + Internet avec diff Avant/Après.",
+                ));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("⚡ Boost PC"))
+                        .add_enabled(!self.is_busy, egui::Button::new(l.tr("⚡ Boost PC", "⚡ Boost PC")))
                         .on_hover_ui(|ui| {
                             show_rich_tooltip(
                                 ui,
-                                "Boost PC Safe",
-                                "Vide les fichiers temporaires et caches sélectionnés, applique les optimisations de réactivité Windows et affiche le comparatif Avant / Après.",
-                                "✔ Toutes les optimisations sont réversibles dans l'onglet Restauration",
+                                l.tr("Safe PC Boost", "Boost PC Safe"),
+                                l.tr(
+                                    "Cleans selected temp files and caches, applies Windows responsiveness optimizations, and shows Before / After diff.",
+                                    "Vide les fichiers temporaires et caches sélectionnés, applique les optimisations de réactivité Windows et affiche le comparatif Avant / Après.",
+                                ),
+                                l.tr("✔ All optimizations can be reversed in Restore tab", "✔ Toutes les optimisations sont réversibles dans l'onglet Restauration"),
                                 false,
                             );
                         })
@@ -914,13 +1063,16 @@ impl WinCareApp {
                         self.spawn_pc_boost();
                     }
                     if ui
-                        .add_enabled(!self.is_busy, egui::Button::new("🌐 Boost Net"))
+                        .add_enabled(!self.is_busy, egui::Button::new(l.tr("🌐 Boost Net", "🌐 Boost Net")))
                         .on_hover_ui(|ui| {
                             show_rich_tooltip(
                                 ui,
-                                "Boost Internet Safe",
-                                "Teste les résolveurs DNS, applique le plus rapide (sauf si NextDNS est actif), règle le MTU optimal sans fragmentation, vide le cache DNS et optimise la carte Wi-Fi.",
-                                "✔ Préserve automatiquement NextDNS s'il est détecté",
+                                l.tr("Safe Internet Boost", "Boost Internet Safe"),
+                                l.tr(
+                                    "Benchmarks DNS resolvers, applies fastest (unless NextDNS active), sets optimal unfragmented MTU, flushes DNS cache and optimizes Wi-Fi adapter.",
+                                    "Teste les résolveurs DNS, applique le plus rapide (sauf si NextDNS est actif), règle le MTU optimal sans fragmentation, vide le cache DNS et optimise la carte Wi-Fi.",
+                                ),
+                                l.tr("✔ Automatically preserves NextDNS if detected", "✔ Préserve automatiquement NextDNS s'il est détecté"),
                                 false,
                             );
                         })
@@ -934,25 +1086,35 @@ impl WinCareApp {
 
             cols[3].group(|ui| {
                 ui.heading(
-                    RichText::new("★ Win11 Debloat").color(Color32::from_rgb(210, 140, 255)),
+                    RichText::new(l.tr("★ Win11 Debloat", "★ Win11 Debloat")).color(Color32::from_rgb(210, 140, 255)),
                 );
                 let active_count = self.debloat_tweaks.iter().filter(|t| t.is_applied).count();
-                ui.label(format!(
-                    "Désactive Copilot, Recall, Télémétrie, Bing, Widgets et active le clic-droit classique ({active_count}/{} actifs).",
-                    self.debloat_tweaks.len()
-                ));
+                let debloat_sub_text = match l {
+                    Lang::En => format!(
+                        "Disables Copilot, Recall, Telemetry, Bing, Widgets, and enables classic right-click ({active_count}/{} active).",
+                        self.debloat_tweaks.len()
+                    ),
+                    Lang::Fr => format!(
+                        "Désactive Copilot, Recall, Télémétrie, Bing, Widgets et active le clic-droit classique ({active_count}/{} actifs).",
+                        self.debloat_tweaks.len()
+                    ),
+                };
+                ui.label(debloat_sub_text);
                 ui.add_space(4.0);
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("★ Appliquer Pack Debloat Recommandé"),
+                        egui::Button::new(l.tr("★ Apply Recommended Debloat Pack", "★ Appliquer Pack Debloat Recommandé")),
                     )
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Pack Debloat Windows 11 Recommandé",
-                            "Active les 13 tweaks recommandés : désactive Copilot, Recall, Click to Do, IA Edge/Paint/Notepad, Télémétrie, Bing dans Démarrer, Pubs Win11, Widgets, Touches rémanentes 5x Maj, et active le menu clic-droit classique Win10 + extensions de fichiers + Fin de tâche.",
-                            "✔ Annulable à tout moment en 1 clic",
+                            l.tr("Recommended Windows 11 Debloat Pack", "Pack Debloat Windows 11 Recommandé"),
+                            l.tr(
+                                "Applies recommended tweaks: disables Copilot, Recall, Click to Do, AI in Edge/Paint/Notepad, Telemetry, Bing search, Win11 ads, Widgets, Sticky Keys, and enables Win10 classic right-click + file extensions + End Task.",
+                                "Active les 13 tweaks recommandés : désactive Copilot, Recall, Click to Do, IA Edge/Paint/Notepad, Télémétrie, Bing dans Démarrer, Pubs Win11, Widgets, Touches rémanentes 5x Maj, et active le menu clic-droit classique Win10 + extensions de fichiers + Fin de tâche.",
+                            ),
+                            l.tr("✔ Reversible anytime with 1 click", "✔ Annulable à tout moment en 1 clic"),
                             false,
                         );
                     })
@@ -966,30 +1128,32 @@ impl WinCareApp {
 
         ui.add_space(12.0);
         ui.separator();
-        ui.heading("Résumé de l'état détecté");
+        ui.heading(l.tr("Detected System State Summary", "Résumé de l'état détecté"));
 
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
-                ui.label(RichText::new("• Système, Matériel & Stockage Temporaire").strong());
+                ui.label(RichText::new(l.tr("• System, Hardware & Temp Storage", "• Système, Matériel & Stockage Temporaire")).strong());
                 if let Some(d) = &self.pc_diag {
-                    ui.label(format!("Modèle : {}", d.machine_model));
-                    ui.label(format!("OS : {} (Uptime: {:.1} j)", d.os_caption, d.uptime_days));
+                    ui.label(format!("{}: {}", l.tr("Model", "Modèle"), d.machine_model));
+                    ui.label(format!("OS: {} ({} {:.1} {})", d.os_caption, l.tr("Uptime:", "Uptime :"), d.uptime_days, l.tr("d", "j")));
                     ui.label(format!(
-                        "CPU : {} ({} cœurs / {} threads) — Charge : {:.1}%",
-                        d.cpu_name, d.cpu_cores, d.cpu_threads, d.cpu_usage_pct
+                        "CPU: {} ({} {} / {} threads) — {}: {:.1}%",
+                        d.cpu_name, d.cpu_cores, l.tr("cores", "cœurs"), d.cpu_threads, l.tr("Load", "Charge"), d.cpu_usage_pct
                     ));
                     ui.label(format!(
-                        "RAM : {} Mo libres / {} Mo ({:.1}% utilisée)",
-                        d.ram_free_mb, d.ram_total_mb, d.ram_used_pct
+                        "RAM: {} {} / {} MB ({:.1}% {})",
+                        d.ram_free_mb, l.tr("MB free", "Mo libres"), d.ram_total_mb, d.ram_used_pct, l.tr("used", "utilisée")
                     ));
                     ui.label(format!(
-                        "Disque système libre : {:.2} Go | SSD détecté : {}",
+                        "{} : {:.2} GB | SSD : {}",
+                        l.tr("System disk free", "Disque système libre"),
                         d.sys_free_gb,
-                        if d.ssd_detected { "Oui" } else { "Non" }
+                        if d.ssd_detected { l.tr("Yes", "Oui") } else { l.tr("No", "Non") }
                     ));
                     ui.label(
                         RichText::new(format!(
-                            "Caches nettoyables détectés : {} Mo ({:.2} Go)",
+                            "{}: {} MB ({:.2} GB)",
+                            l.tr("Cleanable caches detected", "Caches nettoyables détectés"),
                             d.cache_total_mb,
                             d.cache_total_mb as f64 / 1024.0
                         ))
@@ -997,42 +1161,45 @@ impl WinCareApp {
                     );
                 } else {
                     ui.label(
-                        RichText::new("Aucun diagnostic PC exécuté dans cette session.").weak(),
+                        RichText::new(l.tr("No PC diagnosis run in this session.", "Aucun diagnostic PC exécuté dans cette session.")).weak(),
                     );
                 }
             });
 
             cols[1].group(|ui| {
-                ui.label(RichText::new("• Réseau & Connectivité").strong());
+                ui.label(RichText::new(l.tr("• Network & Connectivity", "• Réseau & Connectivité")).strong());
                 if let Some(n) = &self.net_diag {
                     ui.label(format!(
-                        "Carte active : {} ({})",
-                        n.adapter_name, n.link_speed
+                        "{}: {} ({})",
+                        l.tr("Active adapter", "Carte active"), n.adapter_name, n.link_speed
                     ));
                     ui.label(format!(
-                        "Passerelle : {} | MTU actuel : {} (optimal : {:?})",
-                        n.gateway, n.current_mtu, n.optimal_mtu
+                        "{}: {} | {}: {} ({}: {:?})",
+                        l.tr("Gateway", "Passerelle"), n.gateway,
+                        l.tr("Current MTU", "MTU actuel"), n.current_mtu,
+                        l.tr("optimal", "optimal"), n.optimal_mtu
                     ));
-                    ui.label(format!("DNS actuels : {}", n.current_dns.join(", ")));
+                    ui.label(format!("{}: {}", l.tr("Current DNS", "DNS actuels"), n.current_dns.join(", ")));
                     if n.uses_nextdns {
                         ui.label(
-                            RichText::new(format!("✔ NextDNS actif ({})", n.nextdns_mode))
+                            RichText::new(format!("✔ NextDNS {} ({})", l.tr("active", "actif"), n.nextdns_mode))
                                 .color(Color32::from_rgb(220, 130, 255)),
                         );
                     }
                     if let Some(best) = &n.best_dns {
                         ui.label(format!(
-                            "DNS le plus rapide : {} ({}) en {:?} ms",
-                            best.resolver, best.ip, best.latency_ms
+                            "{}: {} ({}) {} {:?} ms",
+                            l.tr("Fastest DNS", "DNS le plus rapide"),
+                            best.resolver, best.ip, l.tr("in", "en"), best.latency_ms
                         ));
                     }
                     ui.label(format!(
-                        "Ping 1.1.1.1 : {:?} ms (pertes : {}/4)",
-                        n.ping_net_ms, n.ping_loss_count
+                        "Ping 1.1.1.1 : {:?} ms ({}: {}/4)",
+                        n.ping_net_ms, l.tr("losses", "pertes"), n.ping_loss_count
                     ));
                 } else {
                     ui.label(
-                        RichText::new("Aucun diagnostic Internet exécuté dans cette session.")
+                        RichText::new(l.tr("No Internet diagnosis run in this session.", "Aucun diagnostic Internet exécuté dans cette session."))
                             .weak(),
                     );
                 }
@@ -1041,33 +1208,41 @@ impl WinCareApp {
     }
 
     fn render_repair_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
-            ui.heading("Réparation Windows (Interactif & Auto — Streaming Temps Réel)");
+            ui.heading(l.tr(
+                "Windows Repair (Interactive & Auto — Real-Time Streaming)",
+                "Réparation Windows (Interactif & Auto — Streaming Temps Réel)",
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Tout décocher").clicked() {
+                if ui.button(l.tr("Uncheck all", "Tout décocher")).clicked() {
                     self.selected_repairs.clear();
                 }
-                if ui.button("Tout cocher").clicked() {
+                if ui.button(l.tr("Check all", "Tout cocher")).clicked() {
                     for t in RepairTask::ALL {
                         self.selected_repairs.insert(t);
                     }
                 }
             });
         });
-        ui.label("Sélectionnez les outils de réparation système à exécuter dans l'ordre (survolez [?] pour les détails) :");
+        ui.label(l.tr(
+            "Select system repair tools to run in order (hover [?] for details):",
+            "Sélectionnez les outils de réparation système à exécuter dans l'ordre (survolez [?] pour les détails) :",
+        ));
         ui.add_space(6.0);
 
         for task in RepairTask::ALL {
+            let (short_label, subtitle, tooltip_body, tooltip_safety) = repair_task_text(l, task);
             let mut checked = self.selected_repairs.contains(&task);
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     if checkbox_with_help(
                         ui,
                         &mut checked,
-                        &format!("[{}] {}", task.code(), task.label()),
-                        task.label(),
-                        task.description(),
-                        "✔ Outil officiel de maintenance Windows",
+                        &format!("[{}] {}", task.code(), short_label),
+                        short_label,
+                        tooltip_body,
+                        tooltip_safety,
                         false,
                     ) {
                         if checked {
@@ -1079,24 +1254,39 @@ impl WinCareApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_enabled(!self.is_busy, egui::Button::new("Exécuter seul"))
-                            .on_hover_text("Lance uniquement cette réparation tout de suite.")
+                            .add_enabled(!self.is_busy, egui::Button::new(l.tr("Run alone", "Exécuter seul")))
+                            .on_hover_text(l.tr(
+                                "Immediately runs only this repair task.",
+                                "Lance uniquement cette réparation tout de suite.",
+                            ))
                             .clicked()
                         {
                             self.spawn_repair(vec![task], self.schedule_chkdsk_reboot);
                         }
                     });
                 });
-                ui.label(RichText::new(task.description()).weak());
+                ui.label(RichText::new(subtitle).weak());
 
                 if task == RepairTask::Chkdsk {
                     checkbox_with_help(
                         ui,
                         &mut self.schedule_chkdsk_reboot,
-                        "Planifier également un CHKDSK complet (chkdsk C: /F /R /X) au prochain redémarrage",
-                        "Planification CHKDSK /F /R /X au redémarrage",
-                        "Programme une vérification complète du système de fichiers et des secteurs physiques du disque C: lors du prochain démarrage de Windows.",
-                        "⚠ Le prochain démarrage du PC prendra 15 à 45 minutes pendant l'analyse du disque",
+                        l.tr(
+                            "Also schedule a full CHKDSK (chkdsk C: /F /R /X) upon next restart",
+                            "Planifier également un CHKDSK complet (chkdsk C: /F /R /X) au prochain redémarrage",
+                        ),
+                        l.tr(
+                            "Schedule CHKDSK /F /R /X on Next Reboot",
+                            "Planification CHKDSK /F /R /X au redémarrage",
+                        ),
+                        l.tr(
+                            "Schedules a deep integrity check of drive C: filesystem and bad sectors upon next Windows startup.",
+                            "Programme une vérification complète du système de fichiers et des secteurs physiques du disque C: lors du prochain démarrage de Windows.",
+                        ),
+                        l.tr(
+                            "⚠ Next PC boot will take 15 to 45 minutes while scanning the drive",
+                            "⚠ Le prochain démarrage du PC prendra 15 à 45 minutes pendant l'analyse du disque",
+                        ),
                         true,
                     );
                 }
@@ -1110,15 +1300,17 @@ impl WinCareApp {
                 .filter(|t| self.selected_repairs.contains(t))
                 .collect();
 
+            let run_btn_text = match l {
+                Lang::En => format!("▶ Run {} Selected Repairs", ordered.len()),
+                Lang::Fr => format!("▶ Lancer les {} réparations sélectionnées", ordered.len()),
+            };
+
             if ui
                 .add_enabled(
                     !self.is_busy && !ordered.is_empty(),
                     egui::Button::new(
-                        RichText::new(format!(
-                            "▶ Lancer les {} réparations sélectionnées",
-                            ordered.len()
-                        ))
-                        .strong(),
+                        RichText::new(run_btn_text)
+                            .strong(),
                     ),
                 )
                 .clicked()
@@ -1129,22 +1321,29 @@ impl WinCareApp {
     }
 
     fn render_boost_pc_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
-            ui.heading("Boost PC — Analyse, Nettoyage %TEMP%, Optimisations & Startup");
+            ui.heading(l.tr(
+                "Boost PC — Analysis, %TEMP% Cleanup, Optimizations & Startup",
+                "Boost PC — Analyse, Nettoyage %TEMP%, Optimisations & Startup",
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
                         !self.is_busy,
                         egui::Button::new(
-                            RichText::new("▶ Appliquer Nettoyage & Optimisations").strong(),
+                            RichText::new(l.tr("▶ Apply Cleanup & Optimizations", "▶ Appliquer Nettoyage & Optimisations")).strong(),
                         ),
                     )
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Appliquer Nettoyage & Optimisations",
-                            "Exécute toutes les cases cochées dans les colonnes « 1. Options de Nettoyage » et « 2. Optimisations Système », puis calcule le gain de RAM et d'espace disque.",
-                            "✔ Respecte scrupuleusement vos cases cochées",
+                            l.tr("Apply Cleanup & Optimizations", "Appliquer Nettoyage & Optimisations"),
+                            l.tr(
+                                "Executes all checked options in '1. Cleanup Options' and '2. System Optimizations', then calculates RAM and disk space freed.",
+                                "Exécute toutes les cases cochées dans les colonnes « 1. Options de Nettoyage » et « 2. Optimisations Système », puis calcule le gain de RAM et d'espace disque.",
+                            ),
+                            l.tr("✔ Respects all your checked boxes strictly", "✔ Respecte scrupuleusement vos cases cochées"),
                             false,
                         );
                     })
@@ -1155,14 +1354,17 @@ impl WinCareApp {
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("▶ Analyser le PC & %TEMP%"),
+                        egui::Button::new(l.tr("▶ Scan PC & %TEMP%", "▶ Analyser le PC & %TEMP%")),
                     )
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Diagnostic PC & Scan %TEMP% (Lecture seule)",
-                            "Scanne l'état du processeur, de la mémoire RAM, des disques, des 9 dossiers de caches et identifie les 15 sous-dossiers les plus lourds dans %TEMP%.",
-                            "✔ 100 % en lecture seule : ne supprime rien",
+                            l.tr("PC Diagnosis & %TEMP% Scan (Read-only)", "Diagnostic PC & Scan %TEMP% (Lecture seule)"),
+                            l.tr(
+                                "Scans CPU, RAM, disks, 9 cache folders, and identifies the 15 largest subfolders in %TEMP%.",
+                                "Scanne l'état du processeur, de la mémoire RAM, des disques, des 9 dossiers de caches et identifie les 15 sous-dossiers les plus lourds dans %TEMP%.",
+                            ),
+                            l.tr("✔ 100% read-only: does not delete anything", "✔ 100 % en lecture seule : ne supprime rien"),
                             false,
                         );
                     })
@@ -1177,164 +1379,215 @@ impl WinCareApp {
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
                 ui.label(
-                    RichText::new("• 1. Options de Nettoyage (survolez [?] pour les détails)")
-                        .strong(),
+                    RichText::new(l.tr(
+                        "• 1. Cleanup Options (hover [?] for details)",
+                        "• 1. Options de Nettoyage (survolez [?] pour les détails)",
+                    ))
+                    .strong(),
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.clean_user_temp,
-                    "Vider %TEMP% utilisateur",
-                    "Nettoyage du dossier %TEMP% utilisateur",
-                    "Supprime les fichiers et dossiers temporaires de votre session (C:\\Users\\<Vous>\\AppData\\Local\\Temp). C'est ici que s'accumulent les résidus d'installateurs, de navigateurs et d'outils.",
-                    "✔ 100 % sans danger : les fichiers utilisés par vos applications ouvertes sont automatiquement ignorés",
+                    l.tr("Clean user %TEMP%", "Vider %TEMP% utilisateur"),
+                    l.tr("User %TEMP% Folder Cleanup", "Nettoyage du dossier %TEMP% utilisateur"),
+                    l.tr(
+                        "Deletes temporary files from your user session (C:\\Users\\<You>\\AppData\\Local\\Temp) left behind by installers and apps.",
+                        "Supprime les fichiers et dossiers temporaires de votre session (C:\\Users\\<Vous>\\AppData\\Local\\Temp). C'est ici que s'accumulent les résidus d'installateurs, de navigateurs et d'outils.",
+                    ),
+                    l.tr("✔ 100% safe: files in use by active applications are automatically skipped", "✔ 100 % sans danger : les fichiers utilisés par vos applications ouvertes sont automatiquement ignorés"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.clean_sys_temp,
-                    "Vider C:\\Windows\\Temp système",
-                    "Nettoyage du dossier C:\\Windows\\Temp",
-                    "Supprime les fichiers temporaires créés par les services système Windows et les mises à jour de pilotes.",
-                    "✔ 100 % sans danger",
+                    l.tr("Clean C:\\Windows\\Temp system", "Vider C:\\Windows\\Temp système"),
+                    l.tr("System C:\\Windows\\Temp Folder Cleanup", "Nettoyage du dossier C:\\Windows\\Temp"),
+                    l.tr(
+                        "Deletes temporary files created by Windows system services and driver installers.",
+                        "Supprime les fichiers temporaires créés par les services système Windows et les mises à jour de pilotes.",
+                    ),
+                    l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.clean_wu_download,
-                    "Vider le cache Windows Update (SoftwareDistribution\\Download)",
-                    "Purge du cache de téléchargement Windows Update",
-                    "Arrête momentanément le service Windows Update, supprime les anciens paquets de mises à jour déjà installés dans C:\\Windows\\SoftwareDistribution\\Download, puis redémarre le service.",
-                    "✔ 100 % sans danger : libère souvent plusieurs Go et répare les mises à jour bloquées",
+                    l.tr("Clean Windows Update cache (SoftwareDistribution\\Download)", "Vider le cache Windows Update (SoftwareDistribution\\Download)"),
+                    l.tr("Windows Update Download Cache Purge", "Purge du cache de téléchargement Windows Update"),
+                    l.tr(
+                        "Temporarily stops Windows Update service, deletes downloaded update packages in C:\\Windows\\SoftwareDistribution\\Download, then restarts the service.",
+                        "Arrête momentanément le service Windows Update, supprime les anciens paquets de mises à jour déjà installés dans C:\\Windows\\SoftwareDistribution\\Download, puis redémarre le service.",
+                    ),
+                    l.tr("✔ 100% safe: often frees several GB and fixes stuck updates", "✔ 100 % sans danger : libère souvent plusieurs Go et répare les mises à jour bloquées"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.clean_wer_dumps,
-                    "Supprimer les rapports d'erreur (WER) et CrashDumps",
-                    "Suppression des rapports de plantage (WER & CrashDumps)",
-                    "Vide les dossiers Windows Error Reporting (ReportQueue / ReportArchive) ainsi que les fichiers mémoire .dmp dans %LOCALAPPDATA%\\CrashDumps créés lors du crash d'un jeu ou logiciel.",
-                    "✔ 100 % sans danger",
+                    l.tr("Delete error reports (WER) and CrashDumps", "Supprimer les rapports d'erreur (WER) et CrashDumps"),
+                    l.tr("Crash Reports Cleanup (WER & CrashDumps)", "Suppression des rapports de plantage (WER & CrashDumps)"),
+                    l.tr(
+                        "Clears Windows Error Reporting queues and memory .dmp files in %LOCALAPPDATA%\\CrashDumps from application or game crashes.",
+                        "Vide les dossiers Windows Error Reporting (ReportQueue / ReportArchive) ainsi que les fichiers mémoire .dmp dans %LOCALAPPDATA%\\CrashDumps créés lors du crash d'un jeu ou logiciel.",
+                    ),
+                    l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.empty_recycle_bin,
-                    "Vider la corbeille de tous les disques",
-                    "Vidage de la Corbeille Windows",
-                    "Vide définitivement la Corbeille sur tous vos disques internes et externes connectés.",
-                    "⚠ Attention : décochez cette case si vous conservez des fichiers dans votre Corbeille !",
+                    l.tr("Empty Recycle Bin on all drives", "Vider la corbeille de tous les disques"),
+                    l.tr("Windows Recycle Bin Emptying", "Vidage de la Corbeille Windows"),
+                    l.tr(
+                        "Permanently empties the Recycle Bin across all internal and connected external drives.",
+                        "Vide définitivement la Corbeille sur tous vos disques internes et externes connectés.",
+                    ),
+                    l.tr("⚠ Warning: uncheck this if you store files in your Recycle Bin!", "⚠ Attention : décochez cette case si vous conservez des fichiers dans votre Corbeille !"),
                     true,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.dism_component_cleanup,
-                    "Nettoyer le WinSxS (DISM /StartComponentCleanup /ResetBase — lent)",
-                    "Nettoyage approfondi du magasin de composants WinSxS",
-                    "Exécute DISM /StartComponentCleanup /ResetBase pour supprimer les anciennes versions obsolètes des composants système Windows remplacées par les mises à jour récentes.",
-                    "ℹ Décoché par défaut car l'opération dure 5 à 15 minutes (permet de gagner 2 à 8 Go)",
+                    l.tr("Deep WinSxS cleanup (DISM /StartComponentCleanup /ResetBase — slow)", "Nettoyer le WinSxS (DISM /StartComponentCleanup /ResetBase — lent)"),
+                    l.tr("WinSxS Component Store Deep Cleanup", "Nettoyage approfondi du magasin de composants WinSxS"),
+                    l.tr(
+                        "Runs DISM /StartComponentCleanup /ResetBase to remove superseded Windows component versions replaced by recent updates.",
+                        "Exécute DISM /StartComponentCleanup /ResetBase pour supprimer les anciennes versions obsolètes des composants système Windows remplacées par les mises à jour récentes.",
+                    ),
+                    l.tr("ℹ Unchecked by default because it takes 5 to 15 minutes (can free 2 to 8 GB)", "ℹ Décoché par défaut car l'opération dure 5 à 15 minutes (permet de gagner 2 à 8 Go)"),
                     true,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_clean_opts.run_cleanmgr,
-                    "Lancer le nettoyage de disque Windows (cleanmgr silencieux)",
-                    "Nettoyage de disque officiel Microsoft (cleanmgr.exe)",
-                    "Active les 20 règles de nettoyage sécurisées de l'utilitaire Windows Cleanmgr (miniatures, caches DirectX/Internet, anciens journaux de setup) et l'exécute automatiquement.",
-                    "✔ 100 % sans danger",
+                    l.tr("Run Windows Disk Cleanup (silent cleanmgr)", "Lancer le nettoyage de disque Windows (cleanmgr silencieux)"),
+                    l.tr("Official Microsoft Disk Cleanup (cleanmgr.exe)", "Nettoyage de disque officiel Microsoft (cleanmgr.exe)"),
+                    l.tr(
+                        "Enables 20 safe cleanup flags in Windows Cleanmgr (thumbnails, DirectX shader cache, old setup logs) and runs it automatically.",
+                        "Active les 20 règles de nettoyage sécurisées de l'utilitaire Windows Cleanmgr (miniatures, caches DirectX/Internet, anciens journaux de setup) et l'exécute automatiquement.",
+                    ),
+                    l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
                 );
             });
 
             cols[1].group(|ui| {
                 ui.label(
-                    RichText::new("⚡ 2. Optimisations Système (survolez [?] pour les détails)")
-                        .strong(),
+                    RichText::new(l.tr(
+                        "⚡ 2. System Optimizations (hover [?] for details)",
+                        "⚡ 2. Optimisations Système (survolez [?] pour les détails)",
+                    ))
+                    .strong(),
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.high_perf_power,
-                    "Plan d'alimentation : Performances élevées (SCHEME_MIN)",
-                    "Profil d'alimentation « Performances élevées »",
-                    "Configure Windows sur le mode d'alimentation Performances élevées (powercfg /setactive SCHEME_MIN) pour éviter que le processeur ne bride sa fréquence au repos.",
-                    "✔ Recommandé sur PC fixe ou PC portable branché (annulable dans Restauration)",
+                    l.tr("Power Plan: High Performance (SCHEME_MIN)", "Plan d'alimentation : Performances élevées (SCHEME_MIN)"),
+                    l.tr("High Performance Power Profile", "Profil d'alimentation « Performances élevées »"),
+                    l.tr(
+                        "Sets Windows power plan to High Performance (powercfg /setactive SCHEME_MIN) to prevent CPU downclocking during idle transitions.",
+                        "Configure Windows sur le mode d'alimentation Performances élevées (powercfg /setactive SCHEME_MIN) pour éviter que le processeur ne bride sa fréquence au repos.",
+                    ),
+                    l.tr("✔ Recommended on desktop or plugged-in laptop (reversible in Restore tab)", "✔ Recommandé sur PC fixe ou PC portable branché (annulable dans Restauration)"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.ultimate_perf_power,
-                    "Activer le plan 'Ultimate Performance' (créé si absent)",
-                    "Profil caché « Performances optimales » (Ultimate Performance)",
-                    "Débloque et active le plan d'alimentation réservé aux stations de travail (GUID e9a42b02...), qui désactive complètement le micro-parking des cœurs CPU.",
-                    "ℹ Utile sur tour gaming/MAO (consomme un peu plus d'énergie au repos)",
+                    l.tr("Enable 'Ultimate Performance' plan (created if missing)", "Activer le plan 'Ultimate Performance' (créé si absent)"),
+                    l.tr("Hidden 'Ultimate Performance' Profile", "Profil caché « Performances optimales » (Ultimate Performance)"),
+                    l.tr(
+                        "Unlocks and activates workstation power plan (GUID e9a42b02...), eliminating CPU core micro-parking entirely.",
+                        "Débloque et active le plan d'alimentation réservé aux stations de travail (GUID e9a42b02...), qui désactive complètement le micro-parking des cœurs CPU.",
+                    ),
+                    l.tr("ℹ Useful for gaming and audio workstations (slightly higher idle power)", "ℹ Utile sur tour gaming/MAO (consomme un peu plus d'énergie au repos)"),
                     true,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.reduce_visual_fx,
-                    "Réduire les effets visuels (VisualFXSetting = 2 'Meilleures performances')",
-                    "Effets visuels en mode « Meilleures performances »",
-                    "Configure VisualFXSetting = 2 dans l'Explorateur pour désactiver les animations lentes et ombres portées des fenêtres.",
-                    "✔ Rend l'interface plus réactive (annulable en 1 clic dans Restauration)",
+                    l.tr("Reduce visual effects (VisualFXSetting = 2 'Best Performance')", "Réduire les effets visuels (VisualFXSetting = 2 'Meilleures performances')"),
+                    l.tr("Visual Effects in 'Best Performance' Mode", "Effets visuels en mode « Meilleures performances »"),
+                    l.tr(
+                        "Sets VisualFXSetting = 2 in Explorer to disable slow window animations and drop shadows.",
+                        "Configure VisualFXSetting = 2 dans l'Explorateur pour désactiver les animations lentes et ombres portées des fenêtres.",
+                    ),
+                    l.tr("✔ Makes UI snappier (reversible in 1 click in Restore tab)", "✔ Rend l'interface plus réactive (annulable en 1 clic dans Restauration)"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.enable_storage_sense,
-                    "Activer Storage Sense (nettoyage automatique périodique 30j)",
-                    "Assistant Stockage automatique de Windows (Storage Sense)",
-                    "Configure Windows pour purger automatiquement les fichiers temporaires inutilisés et les éléments de la corbeille datant de plus de 30 jours.",
-                    "✔ 100 % sans danger et maintient le PC propre dans la durée",
+                    l.tr("Enable Storage Sense (auto cleanup 30d)", "Activer Storage Sense (nettoyage automatique périodique 30j)"),
+                    l.tr("Windows Storage Sense Auto Cleanup", "Assistant Stockage automatique de Windows (Storage Sense)"),
+                    l.tr(
+                        "Configures Windows to automatically delete unused temporary files and recycle bin items older than 30 days.",
+                        "Configure Windows pour purger automatiquement les fichiers temporaires inutilisés et les éléments de la corbeille datant de plus de 30 jours.",
+                    ),
+                    l.tr("✔ 100% safe and keeps your PC clean over time", "✔ 100 % sans danger et maintient le PC propre dans la durée"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.disable_game_bar,
-                    "Désactiver l'overlay Xbox Game Bar & GameDVR",
-                    "Désactivation de Xbox Game Bar & Capture GameDVR en arrière-plan",
-                    "Désactive l'enregistrement vidéo continu GameDVR et l'overlay automatique Xbox Game Bar (sans désinstaller l'application Xbox).",
-                    "✔ Évite les pertes de FPS et micro-saccades en jeu",
+                    l.tr("Disable Xbox Game Bar overlay & GameDVR", "Désactiver l'overlay Xbox Game Bar & GameDVR"),
+                    l.tr("Disable Xbox Game Bar & Background GameDVR Capture", "Désactivation de Xbox Game Bar & Capture GameDVR en arrière-plan"),
+                    l.tr(
+                        "Disables background video recording GameDVR and Xbox Game Bar overlay (without uninstalling Xbox app).",
+                        "Désactive l'enregistrement vidéo continu GameDVR et l'overlay automatique Xbox Game Bar (sans désinstaller l'application Xbox).",
+                    ),
+                    l.tr("✔ Prevents FPS drops and micro-stutters during gaming", "✔ Évite les pertes de FPS et micro-saccades en jeu"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.disable_transparency,
-                    "Désactiver les effets de transparence Windows",
-                    "Désactivation du flou de transparence (Acrylique / Mica)",
-                    "Met EnableTransparency = 0 dans les paramètres de personnalisation Windows pour alléger le rendu graphique du bureau.",
-                    "✔ Réversible à tout moment dans Restauration",
+                    l.tr("Disable Windows transparency effects", "Désactiver les effets de transparence Windows"),
+                    l.tr("Disable Acrylic / Mica Transparency Blur", "Désactivation du flou de transparence (Acrylique / Mica)"),
+                    l.tr(
+                        "Sets EnableTransparency = 0 in Windows personalization settings to lighten desktop GPU rendering.",
+                        "Met EnableTransparency = 0 dans les paramètres de personnalisation Windows pour alléger le rendu graphique du bureau.",
+                    ),
+                    l.tr("✔ Reversible anytime in Restore tab", "✔ Réversible à tout moment dans Restauration"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.disable_sysmain,
-                    "Désactiver SysMain / Superfetch (uniquement si SSD + RAM >= 8 Go)",
-                    "Désactivation intelligente du service SysMain (Superfetch)",
-                    "SysMain précharge des applications en mémoire mais génère parfois une activité disque/RAM inutile sur les PC modernes équipés d'un SSD rapide.",
-                    "✔ Sécurisé : WinCare vérifie que vous avez un SSD et >= 8 Go de RAM avant de le désactiver",
+                    l.tr("Disable SysMain / Superfetch (only if SSD + RAM >= 8 GB)", "Désactiver SysMain / Superfetch (uniquement si SSD + RAM >= 8 Go)"),
+                    l.tr("Smart SysMain (Superfetch) Service Disabling", "Désactivation intelligente du service SysMain (Superfetch)"),
+                    l.tr(
+                        "SysMain preloads apps into memory but can cause unnecessary disk/RAM churn on modern PCs with fast SSDs.",
+                        "SysMain précharge des applications en mémoire mais génère parfois une activité disque/RAM inutile sur les PC modernes équipés d'un SSD rapide.",
+                    ),
+                    l.tr("✔ Safe: WinCare checks for SSD and >= 8 GB RAM before disabling", "✔ Sécurisé : WinCare vérifie que vous avez un SSD et >= 8 Go de RAM avant de le désactiver"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.pc_optim_opts.optimize_volume_trim,
-                    "Exécuter Optimize-Volume (TRIM sur SSD / Défragmentation sur HDD)",
-                    "Optimisation du disque système (TRIM SSD / Defrag HDD)",
-                    "Appelle la cmdlet officielle Optimize-Volume sur le lecteur C: : exécute un TRIM rapide si c'est un SSD (maintient les performances d'écriture) ou défragmente si c'est un HDD.",
-                    "✔ 100 % sans danger et recommandé par Microsoft",
+                    l.tr("Run Optimize-Volume (TRIM on SSD / Defrag on HDD)", "Exécuter Optimize-Volume (TRIM sur SSD / Défragmentation sur HDD)"),
+                    l.tr("System Drive Optimization (TRIM SSD / Defrag HDD)", "Optimisation du disque système (TRIM SSD / Defrag HDD)"),
+                    l.tr(
+                        "Calls official Optimize-Volume on C: drive: runs fast TRIM on SSD (maintains write speed) or defrags HDD.",
+                        "Appelle la cmdlet officielle Optimize-Volume sur le lecteur C: : exécute un TRIM rapide si c'est un SSD (maintient les performances d'écriture) ou défragmente si c'est un HDD.",
+                    ),
+                    l.tr("✔ 100% safe and recommended by Microsoft", "✔ 100 % sans danger et recommandé par Microsoft"),
                     false,
                 );
             });
@@ -1348,21 +1601,28 @@ impl WinCareApp {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "• 3. Analyseur des plus gros dossiers dans %TEMP% ({:.1} Mo / {:.2} Go listés)",
+                        "• 3. {} ({:.1} {} / {:.2} {} {})",
+                        l.tr("Largest folders in %TEMP%", "Analyseur des plus gros dossiers dans %TEMP%"),
                         total_top_mb,
-                        total_top_mb / 1024.0
+                        l.tr("MB", "Mo"),
+                        total_top_mb / 1024.0,
+                        l.tr("GB", "Go"),
+                        l.tr("listed", "listés"),
                     ))
                     .strong()
                     .color(Color32::from_rgb(255, 200, 85)),
                 );
                 if ui
-                    .add_enabled(!self.is_busy, egui::Button::new("▶ Scanner %TEMP%"))
+                    .add_enabled(!self.is_busy, egui::Button::new(l.tr("▶ Scan %TEMP%", "▶ Scanner %TEMP%")))
                     .on_hover_ui(|ui| {
                         show_rich_tooltip(
                             ui,
-                            "Scanner le Top 15 des dossiers dans %TEMP%",
-                            "Analyse tous les sous-dossiers de %TEMP% et C:\\Windows\\Temp et les trie du plus lourd au plus léger pour voir exactement ce qui prend de la place.",
-                            "✔ 100 % en lecture seule",
+                            l.tr("Scan Top 15 folders in %TEMP%", "Scanner le Top 15 des dossiers dans %TEMP%"),
+                            l.tr(
+                                "Analyzes all subfolders in %TEMP% and C:\\Windows\\Temp, sorted by size descending to see what consumes disk space.",
+                                "Analyse tous les sous-dossiers de %TEMP% et C:\\Windows\\Temp et les trie du plus lourd au plus léger pour voir exactement ce qui prend de la place.",
+                            ),
+                            l.tr("✔ 100% read-only", "✔ 100 % en lecture seule"),
                             false,
                         );
                     })
@@ -1375,16 +1635,19 @@ impl WinCareApp {
                         .add_enabled(
                             !self.is_busy,
                             egui::Button::new(
-                                RichText::new("✕ Purger tous ces gros éléments")
+                                RichText::new(l.tr("✕ Purge all these large items", "✕ Purger tous ces gros éléments"))
                                     .color(Color32::from_rgb(255, 110, 110)),
                             ),
                         )
                         .on_hover_ui(|ui| {
                             show_rich_tooltip(
                                 ui,
-                                "Purger tous les gros éléments temporaires listés",
-                                "Supprime d'un seul coup les sous-dossiers temporaires listés dans ce tableau (protégé pour n'agir qu'à l'intérieur de %TEMP%).",
-                                "✔ Libère immédiatement les gigaoctets correspondants",
+                                l.tr("Purge all listed large temporary items", "Purger tous les gros éléments temporaires listés"),
+                                l.tr(
+                                    "Deletes all temporary subfolders listed in this table at once (safely restricted to %TEMP%).",
+                                    "Supprime d'un seul coup les sous-dossiers temporaires listés dans ce tableau (protégé pour n'agir qu'à l'intérieur de %TEMP%).",
+                                ),
+                                l.tr("✔ Immediately frees the corresponding gigabytes", "✔ Libère immédiatement les gigaoctets correspondants"),
                                 false,
                             );
                         })
@@ -1398,9 +1661,10 @@ impl WinCareApp {
 
             if self.temp_subfolders.is_empty() {
                 ui.label(
-                    RichText::new(
+                    RichText::new(l.tr(
+                        "Click 'Scan %TEMP%' to inspect which subfolders consume your temporary space.",
                         "Cliquez sur « Scanner %TEMP% » pour voir quels sous-dossiers occupent vos gigaoctets temporaires.",
-                    )
+                    ))
                     .weak(),
                 );
             } else {
@@ -1412,11 +1676,11 @@ impl WinCareApp {
                             .striped(true)
                             .num_columns(5)
                             .show(ui, |ui| {
-                                ui.strong("Action");
-                                ui.strong("Nom");
-                                ui.strong("Taille");
-                                ui.strong("Fichiers");
-                                ui.strong("Chemin");
+                                ui.strong(l.tr("Action", "Action"));
+                                ui.strong(l.tr("Name", "Nom"));
+                                ui.strong(l.tr("Size", "Taille"));
+                                ui.strong(l.tr("Files", "Fichiers"));
+                                ui.strong(l.tr("Path", "Chemin"));
                                 ui.end_row();
 
                                 let items_snapshot = self.temp_subfolders.clone();
@@ -1424,10 +1688,11 @@ impl WinCareApp {
                                     if ui
                                         .add_enabled(
                                             !self.is_busy,
-                                            egui::Button::new("✕ Supprimer"),
+                                            egui::Button::new(l.tr("✕ Delete", "✕ Supprimer")),
                                         )
                                         .on_hover_text(format!(
-                                            "Supprimer uniquement le dossier/fichier temporaire :\n{}",
+                                            "{}:\n{}",
+                                            l.tr("Delete only this temporary folder/file", "Supprimer uniquement le dossier/fichier temporaire"),
                                             item.path
                                         ))
                                         .clicked()
@@ -1436,9 +1701,9 @@ impl WinCareApp {
                                     }
                                     ui.label(&item.name).on_hover_text(&item.path);
                                     let size_txt = if item.size_mb >= 1024.0 {
-                                        format!("{:.2} Go", item.size_mb / 1024.0)
+                                        format!("{:.2} {}", item.size_mb / 1024.0, l.tr("GB", "Go"))
                                     } else {
-                                        format!("{:.1} Mo", item.size_mb)
+                                        format!("{:.1} {}", item.size_mb, l.tr("MB", "Mo"))
                                     };
                                     ui.label(
                                         RichText::new(size_txt)
@@ -1461,14 +1726,20 @@ impl WinCareApp {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "• 4. Programmes au démarrage ({} détectés — compatible Gestionnaire des tâches)",
-                        self.startup_items.len()
+                        "• 4. {} ({} {} — {})",
+                        l.tr("Startup Programs", "Programmes au démarrage"),
+                        self.startup_items.len(),
+                        l.tr("detected", "détectés"),
+                        l.tr("Task Manager compatible", "compatible Gestionnaire des tâches")
                     ))
                     .strong(),
                 );
                 if ui
-                    .small_button("↻ Actualiser la liste")
-                    .on_hover_text("Relit l'état actuel des applications au démarrage dans le Registre Windows.")
+                    .small_button(l.tr("↻ Refresh list", "↻ Actualiser la liste"))
+                    .on_hover_text(l.tr(
+                        "Rereads current startup applications state from Windows Registry.",
+                        "Relit l'état actuel des applications au démarrage dans le Registre Windows.",
+                    ))
                     .clicked()
                 {
                     self.startup_items = crate::boost_pc::list_startup_items();
@@ -1483,10 +1754,10 @@ impl WinCareApp {
                         .striped(true)
                         .num_columns(4)
                         .show(ui, |ui| {
-                            ui.strong("État");
-                            ui.strong("Nom");
-                            ui.strong("Emplacement");
-                            ui.strong("Commande");
+                            ui.strong(l.tr("State", "État"));
+                            ui.strong(l.tr("Name", "Nom"));
+                            ui.strong(l.tr("Location", "Emplacement"));
+                            ui.strong(l.tr("Command", "Commande"));
                             ui.end_row();
 
                             let items_snapshot = self.startup_items.clone();
@@ -1503,12 +1774,22 @@ impl WinCareApp {
                                     .on_hover_ui(|ui| {
                                         show_rich_tooltip(
                                             ui,
-                                            &format!("Programme au démarrage : {}", item.name),
+                                            &format!("{}: {}", l.tr("Startup Program", "Programme au démarrage"), item.name),
                                             &format!(
-                                                "Commande : {}\nSource : {}\n\nCliquez pour basculer entre [ON] (lancé au démarrage de Windows) et [OFF] (désactivé au démarrage).",
-                                                item.command, item.source
+                                                "{}: {}\n{}: {}\n\n{}",
+                                                l.tr("Command", "Commande"),
+                                                item.command,
+                                                l.tr("Source", "Source"),
+                                                item.source,
+                                                l.tr(
+                                                    "Click to toggle between [ON] (launched at Windows startup) and [OFF] (disabled at startup).",
+                                                    "Cliquez pour basculer entre [ON] (lancé au démarrage de Windows) et [OFF] (désactivé au démarrage)."
+                                                )
                                             ),
-                                            "✔ Utilise le mécanisme officiel StartupApproved du Gestionnaire des tâches (aucune entrée n'est supprimée)",
+                                            l.tr(
+                                                "✔ Uses official Task Manager StartupApproved mechanism (no entry is deleted)",
+                                                "✔ Utilise le mécanisme officiel StartupApproved du Gestionnaire des tâches (aucune entrée n'est supprimée)"
+                                            ),
                                             false,
                                         );
                                     })
@@ -1547,8 +1828,8 @@ impl WinCareApp {
         if !self.pc_diffs.is_empty() {
             ui.add_space(6.0);
             ui.group(|ui| {
-                ui.label(RichText::new("• Comparaison Avant / Après").strong());
-                render_diff_table(ui, "pc_diff_grid", &self.pc_diffs);
+                ui.label(RichText::new(l.tr("• Before / After Comparison", "• Comparaison Avant / Après")).strong());
+                render_diff_table(ui, "pc_diff_grid", &self.pc_diffs, l);
             });
         }
 
@@ -1558,36 +1839,39 @@ impl WinCareApp {
                 cols[0].group(|ui| {
                     ui.label(
                         RichText::new(format!(
-                            "• Caches & Débris détectés (Total : {} Mo)",
-                            diag.cache_total_mb
+                            "• {} ({}: {} {})",
+                            l.tr("Detected Caches & Residues", "Caches & Débris détectés"),
+                            l.tr("Total", "Total"),
+                            diag.cache_total_mb,
+                            l.tr("MB", "Mo")
                         ))
                         .strong(),
                     );
                     egui::Grid::new("caches_grid").striped(true).show(ui, |ui| {
-                        ui.strong("Cache");
-                        ui.strong("Taille");
+                        ui.strong(l.tr("Cache", "Cache"));
+                        ui.strong(l.tr("Size", "Taille"));
                         ui.end_row();
                         for c in &diag.caches {
                             ui.label(&c.label).on_hover_text(&c.path);
-                            ui.label(format!("{} Mo", c.size_mb));
+                            ui.label(format!("{} {}", c.size_mb, l.tr("MB", "Mo")));
                             ui.end_row();
                         }
                     });
                 });
 
                 cols[1].group(|ui| {
-                    ui.label(RichText::new("• Top Processus par RAM").strong());
+                    ui.label(RichText::new(l.tr("• Top Processes by RAM", "• Top Processus par RAM")).strong());
                     egui::Grid::new("top_proc_grid")
                         .striped(true)
                         .show(ui, |ui| {
                             ui.strong("PID");
-                            ui.strong("Processus");
+                            ui.strong(l.tr("Process", "Processus"));
                             ui.strong("RAM");
                             ui.end_row();
                             for p in &diag.top_processes {
                                 ui.label(p.pid.to_string());
                                 ui.label(&p.name);
-                                ui.label(format!("{} Mo", p.ram_mb));
+                                ui.label(format!("{} {}", p.ram_mb, l.tr("MB", "Mo")));
                                 ui.end_row();
                             }
                         });
@@ -1597,17 +1881,28 @@ impl WinCareApp {
     }
 
     fn render_boost_net_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
-            ui.heading("Boost Internet — Diagnostic Réseau, Benchmark DNS & MTU");
+            ui.heading(l.tr(
+                "Boost Internet — Network Diagnosis, DNS Benchmark & MTU",
+                "Boost Internet — Diagnostic Réseau, Benchmark DNS & MTU",
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
                         !self.is_busy,
                         egui::Button::new(
-                            RichText::new("▶ Appliquer les Optimisations Réseau").strong(),
+                            RichText::new(l.tr(
+                                "▶ Apply Network Optimizations",
+                                "▶ Appliquer les Optimisations Réseau",
+                            ))
+                            .strong(),
                         ),
                     )
-                    .on_hover_text("Applique les optimisations réseau cochées ci-dessous et affiche le comparatif de ping Avant / Après.")
+                    .on_hover_text(l.tr(
+                        "Applies checked network optimizations below and displays Before / After ping comparison.",
+                        "Applique les optimisations réseau cochées ci-dessous et affiche le comparatif de ping Avant / Après.",
+                    ))
                     .clicked()
                 {
                     self.spawn_net_boost();
@@ -1615,15 +1910,21 @@ impl WinCareApp {
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("▶ Diagnostiquer la connexion"),
+                        egui::Button::new(l.tr("▶ Diagnose Connection", "▶ Diagnostiquer la connexion")),
                     )
-                    .on_hover_text("Teste en lecture seule votre route réseau, le ping, les serveurs DNS les plus rapides et le MTU optimal sans fragmentation.")
+                    .on_hover_text(l.tr(
+                        "Read-only test of network route, ping, fastest DNS servers, and optimal MTU without fragmentation.",
+                        "Teste en lecture seule votre route réseau, le ping, les serveurs DNS les plus rapides et le MTU optimal sans fragmentation.",
+                    ))
                     .clicked()
                 {
                     self.spawn_net_diagnose();
                 }
-                ui.checkbox(&mut self.include_speedtest, "Speedtest Ookla")
-                    .on_hover_text("Exécute également un test de bande passante Download / Upload via Ookla Speedtest CLI.");
+                ui.checkbox(&mut self.include_speedtest, l.tr("Ookla Speedtest", "Speedtest Ookla"))
+                    .on_hover_text(l.tr(
+                        "Also runs Download / Upload bandwidth test via Ookla Speedtest CLI.",
+                        "Exécute également un test de bande passante Download / Upload via Ookla Speedtest CLI.",
+                    ));
             });
         });
         ui.add_space(6.0);
@@ -1631,113 +1932,151 @@ impl WinCareApp {
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
                 ui.label(
-                    RichText::new(
+                    RichText::new(l.tr(
+                        "⚙ Available Network Optimizations (hover [?] for details)",
                         "⚙ Optimisations Réseau disponibles (survolez [?] pour les détails)",
-                    )
+                    ))
                     .strong(),
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.apply_best_dns,
-                    "Appliquer le résolveur DNS le plus rapide (préserve NextDNS si actif)",
-                    "Configuration automatique du meilleur serveur DNS",
-                    "Teste en temps réel la latence de Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9) et OpenDNS, puis applique le plus rapide sur votre carte active.",
-                    "✔ Si NextDNS est détecté sur votre PC, vos DNS ne sont JAMAIS modifiés pour préserver votre filtrage anti-pub",
+                    l.tr(
+                        "Apply fastest DNS resolver (preserves NextDNS if active)",
+                        "Appliquer le résolveur DNS le plus rapide (préserve NextDNS si actif)",
+                    ),
+                    l.tr("Automatic Best DNS Server Configuration", "Configuration automatique du meilleur serveur DNS"),
+                    l.tr(
+                        "Benchmarks Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9), and OpenDNS in real-time, applying the fastest to your active adapter.",
+                        "Teste en temps réel la latence de Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9) et OpenDNS, puis applique le plus rapide sur votre carte active.",
+                    ),
+                    l.tr(
+                        "✔ If NextDNS is detected, your DNS is NEVER modified to preserve ad-filtering",
+                        "✔ Si NextDNS est détecté sur votre PC, vos DNS ne sont JAMAIS modifiés pour préserver votre filtrage anti-pub",
+                    ),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.apply_optimal_mtu,
-                    "Régler le MTU optimal détecté sans fragmentation",
-                    "Calibrage du MTU (Maximum Transmission Unit)",
-                    "Envoie des paquets ICMP avec le flag 'Don't Fragment' (1500, 1492, 1472...) pour trouver la taille maximale qui passe sans être découpée par votre box/FAI.",
-                    "✔ Évite les pertes de paquets et la latence en jeu (annulable dans Restauration)",
+                    l.tr("Set optimal unfragmented MTU detected", "Régler le MTU optimal détecté sans fragmentation"),
+                    l.tr("Optimal MTU (Maximum Transmission Unit) Tuning", "Calibrage du MTU (Maximum Transmission Unit)"),
+                    l.tr(
+                        "Sends ICMP packets with 'Don't Fragment' flag (1500, 1492, 1472...) to discover the highest packet size passed without ISP fragmentation.",
+                        "Envoie des paquets ICMP avec le flag 'Don't Fragment' (1500, 1492, 1472...) pour trouver la taille maximale qui passe sans être découpée par votre box/FAI.",
+                    ),
+                    l.tr(
+                        "✔ Prevents packet loss and gaming latency (reversible in Restore tab)",
+                        "✔ Évite les pertes de paquets et la latence en jeu (annulable dans Restauration)",
+                    ),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.flush_dns,
-                    "Vider le cache DNS (ipconfig /flushdns)",
-                    "Purge du cache de résolution DNS",
-                    "Vide les entrées DNS mises en cache par Windows pour résoudre immédiatement les domaines avec les nouvelles adresses IP.",
-                    "✔ 100 % sans danger",
+                    l.tr("Flush DNS cache (ipconfig /flushdns)", "Vider le cache DNS (ipconfig /flushdns)"),
+                    l.tr("DNS Resolver Cache Purge", "Purge du cache de résolution DNS"),
+                    l.tr(
+                        "Flushes DNS resolver cache so domains immediately resolve to new IP addresses.",
+                        "Vide les entrées DNS mises en cache par Windows pour résoudre immédiatement les domaines avec les nouvelles adresses IP.",
+                    ),
+                    l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.disable_wifi_power_saving,
-                    "Wi-Fi : Désactiver l'économie d'énergie de la carte sans-fil",
-                    "Mode Performances Maximales pour la carte Wi-Fi",
-                    "Configure le profil d'alimentation de l'adaptateur sans-fil sur 0 (Performance maximale) pour empêcher la carte Wi-Fi de se mettre en micro-veille.",
-                    "✔ Réduit les pics de ping (jitter) en Wi-Fi",
+                    l.tr("Wi-Fi: Disable wireless adapter power saving", "Wi-Fi : Désactiver l'économie d'énergie de la carte sans-fil"),
+                    l.tr("Maximum Performance Mode for Wi-Fi Adapter", "Mode Performances Maximales pour la carte Wi-Fi"),
+                    l.tr(
+                        "Sets wireless adapter power index to 0 (Maximum Performance) to prevent Wi-Fi micro-sleep states.",
+                        "Configure le profil d'alimentation de l'adaptateur sans-fil sur 0 (Performance maximale) pour empêcher la carte Wi-Fi de se mettre en micro-veille.",
+                    ),
+                    l.tr("✔ Reduces ping spikes (jitter) on Wi-Fi", "✔ Réduit les pics de ping (jitter) en Wi-Fi"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.disable_wu_p2p,
-                    "Limiter le partage P2P de Windows Update (DODownloadMode = 0)",
-                    "Désactivation du partage P2P Windows Update (Delivery Optimization)",
-                    "Configure DODownloadMode = 0 pour empêcher Windows d'utiliser votre connexion montante (Upload) afin d'envoyer des mises à jour à d'autres PC sur Internet.",
-                    "✔ Libère la bande passante Upload et stabilise le ping",
+                    l.tr("Limit Windows Update P2P sharing (DODownloadMode = 0)", "Limiter le partage P2P de Windows Update (DODownloadMode = 0)"),
+                    l.tr("Disable Windows Update Delivery Optimization P2P", "Désactivation du partage P2P Windows Update (Delivery Optimization)"),
+                    l.tr(
+                        "Sets DODownloadMode = 0 to prevent Windows from consuming upload bandwidth to distribute updates to other PCs.",
+                        "Configure DODownloadMode = 0 pour empêcher Windows d'utiliser votre connexion montante (Upload) afin d'envoyer des mises à jour à d'autres PC sur Internet.",
+                    ),
+                    l.tr("✔ Frees upload bandwidth and stabilizes ping", "✔ Libère la bande passante Upload et stabilise le ping"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.disable_smb1,
-                    "Désactiver le protocole vétuste SMB1 (sécurité + performance)",
-                    "Désactivation du protocole SMBv1",
-                    "Désactive la fonctionnalité Windows SMB1Protocol si elle est encore active sur le système.",
-                    "✔ Recommandé par Microsoft (sécurité réseau)",
+                    l.tr("Disable legacy SMB1 protocol (security + performance)", "Désactiver le protocole vétuste SMB1 (sécurité + performance)"),
+                    l.tr("SMBv1 Protocol Disabling", "Désactivation du protocole SMBv1"),
+                    l.tr(
+                        "Disables obsolete SMB1Protocol feature if still enabled on the system.",
+                        "Désactive la fonctionnalité Windows SMB1Protocol si elle est encore active sur le système.",
+                    ),
+                    l.tr("✔ Recommended by Microsoft (network security)", "✔ Recommandé par Microsoft (sécurité réseau)"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.reset_winsock_tcp,
-                    "Reset complet des piles Winsock + TCP/IP (nécessite un redémarrage)",
-                    "Réinitialisation Winsock & Pile TCP/IP",
-                    "Exécute netsh winsock reset et netsh int ip reset pour réparer les sockets réseau corrompus.",
-                    "⚠ Décoché par défaut : nécessite un redémarrage du PC après application",
+                    l.tr("Complete Winsock + TCP/IP stack reset (requires reboot)", "Reset complet des piles Winsock + TCP/IP (nécessite un redémarrage)"),
+                    l.tr("Winsock & TCP/IP Stack Reset", "Réinitialisation Winsock & Pile TCP/IP"),
+                    l.tr(
+                        "Runs netsh winsock reset and netsh int ip reset to repair corrupted network sockets.",
+                        "Exécute netsh winsock reset et netsh int ip reset pour réparer les sockets réseau corrompus.",
+                    ),
+                    l.tr(
+                        "⚠ Unchecked by default: requires a PC reboot after execution",
+                        "⚠ Décoché par défaut : nécessite un redémarrage du PC après application",
+                    ),
                     true,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.net_optim_opts.run_speedtest_after,
-                    "Relancer Speedtest après optimisation pour comparer le débit",
-                    "Second test de débit après optimisation",
-                    "Si speedtest.exe est disponible, relance un test Download/Upload après application des réglages pour mesurer le delta.",
-                    "ℹ Ajoute ~25 secondes à la fin de l'optimisation",
+                    l.tr("Rerun Speedtest after optimization to compare bandwidth", "Relancer Speedtest après optimisation pour comparer le débit"),
+                    l.tr("Post-Optimization Bandwidth Benchmark", "Second test de débit après optimisation"),
+                    l.tr(
+                        "If speedtest.exe is present, executes another test after applying settings to measure bandwidth delta.",
+                        "Si speedtest.exe est disponible, relance un test Download/Upload après application des réglages pour mesurer le delta.",
+                    ),
+                    l.tr("ℹ Adds ~25 seconds at the end of optimization", "ℹ Ajoute ~25 secondes à la fin de l'optimisation"),
                     false,
                 );
             });
 
             cols[1].group(|ui| {
-                ui.label(RichText::new("• État de l'interface & Latence").strong());
+                ui.label(RichText::new(l.tr("• Interface State & Latency", "• État de l'interface & Latence")).strong());
                 if let Some(d) = &self.net_diag {
-                    ui.label(format!("Adaptateur : {} ({})", d.adapter_name, d.adapter_desc));
-                    ui.label(format!("Type : {} | Vitesse : {}", d.media_type, d.link_speed));
+                    ui.label(format!("{}: {} ({})", l.tr("Adapter", "Adaptateur"), d.adapter_name, d.adapter_desc));
+                    ui.label(format!("{}: {} | {}: {}", l.tr("Type", "Type"), d.media_type, l.tr("Speed", "Vitesse"), d.link_speed));
                     ui.label(format!(
-                        "Passerelle : {} (Ping : {:?} ms)",
-                        d.gateway, d.ping_gw_ms
+                        "{}: {} (Ping: {:?} ms)",
+                        l.tr("Gateway", "Passerelle"), d.gateway, d.ping_gw_ms
                     ));
                     ui.label(format!(
-                        "Ping 1.1.1.1 : {:?} ms | Pertes : {}",
-                        d.ping_net_ms, d.ping_loss_count
+                        "Ping 1.1.1.1 : {:?} ms | {}: {}",
+                        d.ping_net_ms, l.tr("Losses", "Pertes"), d.ping_loss_count
                     ));
                     ui.label(format!(
-                        "MTU actuel : {} | MTU optimal sans fragmentation : {:?}",
-                        d.current_mtu, d.optimal_mtu
+                        "{}: {} | {}: {:?}",
+                        l.tr("Current MTU", "MTU actuel"), d.current_mtu,
+                        l.tr("Optimal MTU without fragmentation", "MTU optimal sans fragmentation"), d.optimal_mtu
                     ));
                     ui.label(format!(
-                        "Débit instantané : ↓ {:.2} Mbps | ↑ {:.2} Mbps",
-                        d.rx_mbps, d.tx_mbps
+                        "{}: ↓ {:.2} Mbps | ↑ {:.2} Mbps",
+                        l.tr("Instant throughput", "Débit instantané"), d.rx_mbps, d.tx_mbps
                     ));
                     if let (Some(dl), Some(ul)) = (d.speedtest_dl_mbps, d.speedtest_ul_mbps) {
                         ui.label(
@@ -1751,8 +2090,8 @@ impl WinCareApp {
                     if d.uses_nextdns {
                         ui.label(
                             RichText::new(format!(
-                                "✔ NextDNS détecté ({}) — Filtrage préservé",
-                                d.nextdns_mode
+                                "✔ NextDNS {} ({}) — {}",
+                                l.tr("detected", "détecté"), d.nextdns_mode, l.tr("filtering preserved", "Filtrage préservé")
                             ))
                             .color(Color32::from_rgb(220, 130, 255))
                             .strong(),
@@ -1760,9 +2099,10 @@ impl WinCareApp {
                     }
                 } else {
                     ui.label(
-                        RichText::new(
+                        RichText::new(l.tr(
+                            "Click 'Diagnose Connection' to analyze your network.",
                             "Cliquez sur « Diagnostiquer la connexion » pour analyser votre réseau.",
-                        )
+                        ))
                         .weak(),
                     );
                 }
@@ -1772,8 +2112,8 @@ impl WinCareApp {
         if !self.net_diffs.is_empty() {
             ui.add_space(6.0);
             ui.group(|ui| {
-                ui.label(RichText::new("• Comparaison Réseau Avant / Après").strong());
-                render_diff_table(ui, "net_diff_grid", &self.net_diffs);
+                ui.label(RichText::new(l.tr("• Network Before / After Comparison", "• Comparaison Réseau Avant / Après")).strong());
+                render_diff_table(ui, "net_diff_grid", &self.net_diffs, l);
             });
         }
 
@@ -1781,14 +2121,14 @@ impl WinCareApp {
             ui.add_space(6.0);
             ui.columns(2, |cols| {
                 cols[0].group(|ui| {
-                    ui.label(RichText::new("⚡ Benchmark des résolveurs DNS").strong());
+                    ui.label(RichText::new(l.tr("⚡ DNS Resolver Benchmark", "⚡ Benchmark des résolveurs DNS")).strong());
                     egui::Grid::new("dns_bench_grid")
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.strong("Résolveur");
+                            ui.strong(l.tr("Resolver", "Résolveur"));
                             ui.strong("IP");
-                            ui.strong("Latence");
-                            ui.strong("Statut");
+                            ui.strong(l.tr("Latency", "Latence"));
+                            ui.strong(l.tr("Status", "Statut"));
                             ui.end_row();
                             for r in &d.dns_results {
                                 ui.label(&r.resolver);
@@ -1800,11 +2140,11 @@ impl WinCareApp {
                                 );
                                 if r.ok {
                                     ui.label(
-                                        RichText::new("OK").color(Color32::from_rgb(80, 220, 120)),
+                                        RichText::new(l.tr("OK", "OK")).color(Color32::from_rgb(80, 220, 120)),
                                     );
                                 } else {
                                     ui.label(
-                                        RichText::new("Échec")
+                                        RichText::new(l.tr("Failed", "Échec"))
                                             .color(Color32::from_rgb(240, 90, 90)),
                                     );
                                 }
@@ -1814,20 +2154,20 @@ impl WinCareApp {
                 });
 
                 cols[1].group(|ui| {
-                    ui.label(RichText::new("• Processus avec connexions TCP actives").strong());
+                    ui.label(RichText::new(l.tr("• Processes with Active TCP Connections", "• Processus avec connexions TCP actives")).strong());
                     egui::Grid::new("net_proc_grid")
                         .striped(true)
                         .show(ui, |ui| {
                             ui.strong("PID");
-                            ui.strong("Processus");
-                            ui.strong("Connexions");
+                            ui.strong(l.tr("Process", "Processus"));
+                            ui.strong(l.tr("Connections", "Connexions"));
                             ui.strong("RAM");
                             ui.end_row();
                             for p in &d.top_net_processes {
                                 ui.label(p.pid.to_string());
                                 ui.label(&p.name);
                                 ui.label(p.connections.to_string());
-                                ui.label(format!("{} Mo", p.ram_mb));
+                                ui.label(format!("{} {}", p.ram_mb, l.tr("MB", "Mo")));
                                 ui.end_row();
                             }
                         });
@@ -1837,12 +2177,19 @@ impl WinCareApp {
     }
 
     fn render_debloat_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
-            ui.heading("Debloat & Tweaks Windows 11 (Basé sur Win11Debloat)");
+            ui.heading(l.tr(
+                "Windows 11 Debloat & Tweaks (Based on Win11Debloat)",
+                "Debloat & Tweaks Windows 11 (Basé sur Win11Debloat)",
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("↻ Actualiser l'état")
-                    .on_hover_text("Vérifie dans le Registre Windows quels tweaks sont actuellement actifs.")
+                    .small_button(l.tr("↻ Refresh state", "↻ Actualiser l'état"))
+                    .on_hover_text(l.tr(
+                        "Checks in Windows Registry which tweaks are currently active.",
+                        "Vérifie dans le Registre Windows quels tweaks sont actuellement actifs.",
+                    ))
                     .clicked()
                 {
                     self.debloat_tweaks = crate::debloat::list_debloat_tweaks();
@@ -1850,9 +2197,12 @@ impl WinCareApp {
                 if ui
                     .add_enabled(
                         !self.is_busy,
-                        egui::Button::new("↻ Tout remettre par défaut"),
+                        egui::Button::new(l.tr("↻ Reset all to default", "↻ Tout remettre par défaut")),
                     )
-                    .on_hover_text("Annule tous les tweaks de cet onglet et restaure le comportement d'origine de Windows 11.")
+                    .on_hover_text(l.tr(
+                        "Reverts all tweaks in this tab and restores original Windows 11 behavior.",
+                        "Annule tous les tweaks de cet onglet et restaure le comportement d'origine de Windows 11.",
+                    ))
                     .clicked()
                 {
                     self.spawn_debloat_batch(false);
@@ -1861,17 +2211,27 @@ impl WinCareApp {
                     .add_enabled(
                         !self.is_busy,
                         egui::Button::new(
-                            RichText::new("★ Appliquer les Tweaks Recommandés").strong(),
+                            RichText::new(l.tr(
+                                "★ Apply Recommended Tweaks",
+                                "★ Appliquer les Tweaks Recommandés",
+                            ))
+                            .strong(),
                         ),
                     )
-                    .on_hover_text("Active d'un seul coup tous les tweaks marqués (Recommandé).")
+                    .on_hover_text(l.tr(
+                        "Applies all recommended tweaks in one click.",
+                        "Active d'un seul coup tous les tweaks marqués (Recommandé).",
+                    ))
                     .clicked()
                 {
                     self.spawn_debloat_batch(true);
                 }
             });
         });
-        ui.label("Cliquez sur le bouton d'état d'un réglage pour l'activer ou l'annuler instantanément (survolez [?] pour les détails) :");
+        ui.label(l.tr(
+            "Click a toggle button to enable or revert a tweak instantly (hover [?] for details):",
+            "Cliquez sur le bouton d'état d'un réglage pour l'activer ou l'annuler instantanément (survolez [?] pour les détails) :",
+        ));
         ui.add_space(6.0);
 
         let categories = [
@@ -1884,7 +2244,7 @@ impl WinCareApp {
         for cat in categories {
             ui.group(|ui| {
                 ui.label(
-                    RichText::new(cat.label())
+                    RichText::new(debloat_category_title(l, cat))
                         .strong()
                         .color(Color32::from_rgb(130, 210, 255)),
                 );
@@ -1898,13 +2258,16 @@ impl WinCareApp {
                     .collect();
 
                 for tweak in snapshot {
+                    let (t_title, t_desc, t_safety) = debloat_tweak_text(l, &tweak.id)
+                        .unwrap_or((&tweak.title, &tweak.description, "✔ Safe Windows 11 registry setting"));
+
                     ui.horizontal(|ui| {
                         let btn_text = if tweak.is_applied {
-                            RichText::new("✔ [ACTIF]")
+                            RichText::new(l.tr("✔ [ACTIVE]", "✔ [ACTIF]"))
                                 .color(Color32::from_rgb(80, 225, 130))
                                 .strong()
                         } else {
-                            RichText::new("  [PAR DÉFAUT]  ")
+                            RichText::new(l.tr("  [DEFAULT]  ", "  [PAR DÉFAUT]  "))
                                 .color(Color32::from_rgb(165, 165, 165))
                         };
 
@@ -1913,9 +2276,9 @@ impl WinCareApp {
                             .on_hover_ui(|ui| {
                                 show_rich_tooltip(
                                     ui,
-                                    &tweak.title,
-                                    &tweak.description,
-                                    "✔ Cliquez pour basculer entre [ACTIF] et [PAR DÉFAUT] (100 % réversible)",
+                                    t_title,
+                                    t_desc,
+                                    t_safety,
                                     false,
                                 );
                             })
@@ -1936,13 +2299,13 @@ impl WinCareApp {
                             }
                         }
 
-                        ui.label(RichText::new(&tweak.title).strong())
+                        ui.label(RichText::new(t_title).strong())
                             .on_hover_ui(|ui| {
                                 show_rich_tooltip(
                                     ui,
-                                    &tweak.title,
-                                    &tweak.description,
-                                    "✔ Réglage Registre Windows 11 réversible",
+                                    t_title,
+                                    t_desc,
+                                    t_safety,
                                     false,
                                 );
                             });
@@ -1955,20 +2318,20 @@ impl WinCareApp {
                         .on_hover_ui(|ui| {
                             show_rich_tooltip(
                                 ui,
-                                &tweak.title,
-                                &tweak.description,
-                                "✔ Réglage Registre Windows 11 réversible",
+                                t_title,
+                                t_desc,
+                                t_safety,
                                 false,
                             );
                         });
                         if tweak.recommended {
                             ui.label(
-                                RichText::new("(Recommandé)")
+                                RichText::new(l.tr("(Recommended)", "(Recommandé)"))
                                     .color(Color32::from_rgb(100, 200, 255))
                                     .small(),
                             );
                         }
-                        ui.label(RichText::new(format!("— {}", tweak.description)).weak());
+                        ui.label(RichText::new(format!("— {}", t_desc)).weak());
                     });
                 }
             });
@@ -1977,119 +2340,220 @@ impl WinCareApp {
     }
 
     fn render_restore_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Restauration des paramètres par défaut (.RESTORE)");
-        ui.label("Permet d'annuler à tout moment les optimisations appliquées par Boost-PC ou Boost-Internet (survolez [?] pour les détails).");
+        let l = self.lang;
+        ui.heading(l.tr(
+            "Restore Default Settings (.RESTORE)",
+            "Restauration des paramètres par défaut (.RESTORE)",
+        ));
+        ui.label(l.tr(
+            "Revert at any time optimizations applied by Boost-PC or Boost-Internet (hover [?] for details).",
+            "Permet d'annuler à tout moment les optimisations appliquées par Boost-PC ou Boost-Internet (survolez [?] pour les détails).",
+        ));
         ui.add_space(8.0);
 
         ui.columns(2, |cols| {
             cols[0].group(|ui| {
-                ui.label(RichText::new("• Paramètres Système (Boost-PC)").strong());
+                ui.label(RichText::new(l.tr("• System Settings (Boost-PC)", "• Paramètres Système (Boost-PC)")).strong());
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_power_balanced,
-                    "Restaurer le plan d'alimentation Équilibré (SCHEME_BALANCED)",
-                    "Restauration du plan d'alimentation Équilibré",
-                    "Exécute powercfg /setactive SCHEME_BALANCED pour revenir au mode d'alimentation standard de Windows.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Restore Balanced power plan (SCHEME_BALANCED)",
+                        "Restaurer le plan d'alimentation Équilibré (SCHEME_BALANCED)",
+                    ),
+                    l.tr(
+                        "Restore Balanced Power Plan",
+                        "Restauration du plan d'alimentation Équilibré",
+                    ),
+                    l.tr(
+                        "Executes powercfg /setactive SCHEME_BALANCED to return to Windows standard power mode.",
+                        "Exécute powercfg /setactive SCHEME_BALANCED pour revenir au mode d'alimentation standard de Windows.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_visual_fx,
-                    "Restaurer les effets visuels automatiques de Windows (VisualFXSetting = 0)",
-                    "Restauration des effets visuels par défaut",
-                    "Remet VisualFXSetting = 0 pour laisser Windows activer toutes les animations et ombres des fenêtres.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Restore automatic Windows visual effects (VisualFXSetting = 0)",
+                        "Restaurer les effets visuels automatiques de Windows (VisualFXSetting = 0)",
+                    ),
+                    l.tr(
+                        "Restore Default Visual Effects",
+                        "Restauration des effets visuels par défaut",
+                    ),
+                    l.tr(
+                        "Sets VisualFXSetting = 0 to let Windows enable window animations and drop shadows.",
+                        "Remet VisualFXSetting = 0 pour laisser Windows activer toutes les animations et ombres des fenêtres.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_transparency,
-                    "Réactiver la transparence Windows (EnableTransparency = 1)",
-                    "Réactivation de la transparence",
-                    "Remet EnableTransparency = 1 pour réactiver les effets de flou sur la barre des tâches et les fenêtres.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Re-enable Windows transparency (EnableTransparency = 1)",
+                        "Réactiver la transparence Windows (EnableTransparency = 1)",
+                    ),
+                    l.tr(
+                        "Re-enable Transparency",
+                        "Réactivation de la transparence",
+                    ),
+                    l.tr(
+                        "Sets EnableTransparency = 1 to re-enable blur effects on taskbar and windows.",
+                        "Remet EnableTransparency = 1 pour réactiver les effets de flou sur la barre des tâches et les fenêtres.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_sysmain,
-                    "Réactiver et démarrer le service SysMain (Superfetch)",
-                    "Réactivation du service SysMain",
-                    "Configure le service SysMain en démarrage Automatique et le démarre immédiatement.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Re-enable and start SysMain service (Superfetch)",
+                        "Réactiver et démarrer le service SysMain (Superfetch)",
+                    ),
+                    l.tr(
+                        "Re-enable SysMain Service",
+                        "Réactivation du service SysMain",
+                    ),
+                    l.tr(
+                        "Sets SysMain startup type to Automatic and starts the service immediately.",
+                        "Configure le service SysMain en démarrage Automatique et le démarre immédiatement.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_storage_sense,
-                    "Désactiver Storage Sense automatique",
-                    "Désactivation de Storage Sense",
-                    "Remet la clé StoragePolicy '01' à 0 pour désactiver le nettoyage automatique périodique.",
-                    "✔ Sans danger",
+                    l.tr(
+                        "Disable automatic Storage Sense",
+                        "Désactiver Storage Sense automatique",
+                    ),
+                    l.tr(
+                        "Disable Storage Sense",
+                        "Désactivation de Storage Sense",
+                    ),
+                    l.tr(
+                        "Sets StoragePolicy '01' to 0 to disable periodic automated cleanup.",
+                        "Remet la clé StoragePolicy '01' à 0 pour désactiver le nettoyage automatique périodique.",
+                    ),
+                    l.tr("✔ Safe", "✔ Sans danger"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_game_bar,
-                    "Réactiver Xbox Game Bar & GameDVR",
-                    "Réactivation de Xbox Game Bar & GameDVR",
-                    "Remet AutoGameModeEnabled = 1, AllowAutoGameMode = 1 et GameDVR_Enabled = 1.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Re-enable Xbox Game Bar & GameDVR",
+                        "Réactiver Xbox Game Bar & GameDVR",
+                    ),
+                    l.tr(
+                        "Re-enable Xbox Game Bar & GameDVR",
+                        "Réactivation de Xbox Game Bar & GameDVR",
+                    ),
+                    l.tr(
+                        "Restores AutoGameModeEnabled = 1, AllowAutoGameMode = 1 and GameDVR_Enabled = 1.",
+                        "Remet AutoGameModeEnabled = 1, AllowAutoGameMode = 1 et GameDVR_Enabled = 1.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
             });
 
             cols[1].group(|ui| {
-                ui.label(RichText::new("• Paramètres Réseau (Boost-Internet)").strong());
+                ui.label(RichText::new(l.tr("• Network Settings (Boost-Internet)", "• Paramètres Réseau (Boost-Internet)")).strong());
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_dns_dhcp,
-                    "Restaurer les serveurs DNS automatiques (DHCP)",
-                    "Restauration des DNS automatiques de votre Box / FAI",
-                    "Exécute Set-DnsClientServerAddress -ResetServerAddresses sur votre carte réseau active.",
-                    "⚠ Décochez si vous avez configuré NextDNS manuellement par adresse IP statique",
+                    l.tr(
+                        "Restore automatic DNS servers (DHCP)",
+                        "Restaurer les serveurs DNS automatiques (DHCP)",
+                    ),
+                    l.tr(
+                        "Restore Automatic ISP / Router DNS (DHCP)",
+                        "Restauration des DNS automatiques de votre Box / FAI",
+                    ),
+                    l.tr(
+                        "Executes Set-DnsClientServerAddress -ResetServerAddresses on active network adapter.",
+                        "Exécute Set-DnsClientServerAddress -ResetServerAddresses sur votre carte réseau active.",
+                    ),
+                    l.tr(
+                        "⚠ Uncheck if you use NextDNS configured via static IP address",
+                        "⚠ Décochez si vous avez configuré NextDNS manuellement par adresse IP statique",
+                    ),
                     true,
                 );
                 ui.label(
-                    RichText::new(
+                    RichText::new(l.tr(
+                        "  ℹ Uncheck if you use NextDNS configured via static IP.",
                         "  ℹ Décochez si vous utilisez NextDNS configuré par IP statique.",
-                    )
+                    ))
                     .weak(),
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_mtu_1500,
-                    "Restaurer le MTU par défaut (1500)",
-                    "Restauration du MTU = 1500",
-                    "Remet la taille de paquet standard MTU = 1500 sur la carte réseau active via netsh.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Restore default MTU (1500)",
+                        "Restaurer le MTU par défaut (1500)",
+                    ),
+                    l.tr(
+                        "Restore MTU = 1500",
+                        "Restauration du MTU = 1500",
+                    ),
+                    l.tr(
+                        "Resets standard packet size MTU = 1500 on active network adapter via netsh.",
+                        "Remet la taille de paquet standard MTU = 1500 sur la carte réseau active via netsh.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_wu_p2p,
-                    "Restaurer le comportement par défaut de Delivery Optimization (Windows Update)",
-                    "Restauration de Delivery Optimization",
-                    "Supprime la valeur DODownloadMode dans HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization.",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Restore default Delivery Optimization behavior (Windows Update)",
+                        "Restaurer le comportement par défaut de Delivery Optimization (Windows Update)",
+                    ),
+                    l.tr(
+                        "Restore Delivery Optimization",
+                        "Restauration de Delivery Optimization",
+                    ),
+                    l.tr(
+                        "Deletes DODownloadMode in HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization.",
+                        "Supprime la valeur DODownloadMode dans HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization.",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
 
                 checkbox_with_help(
                     ui,
                     &mut self.restore_opts.restore_wifi_power,
-                    "Restaurer l'économie d'énergie Wi-Fi par défaut",
-                    "Restauration de l'économie d'énergie Wi-Fi",
-                    "Remet l'indice d'économie d'énergie de l'adaptateur sans-fil à sa valeur par défaut (3).",
-                    "✔ Valeur d'origine Windows",
+                    l.tr(
+                        "Restore default Wi-Fi power saving",
+                        "Restaurer l'économie d'énergie Wi-Fi par défaut",
+                    ),
+                    l.tr(
+                        "Restore Wi-Fi Power Saving",
+                        "Restauration de l'économie d'énergie Wi-Fi",
+                    ),
+                    l.tr(
+                        "Restores wireless adapter power saving index to its default value (3).",
+                        "Remet l'indice d'économie d'énergie de l'adaptateur sans-fil à sa valeur par défaut (3).",
+                    ),
+                    l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
                 );
             });
@@ -2099,9 +2563,12 @@ impl WinCareApp {
         if ui
             .add_enabled(
                 !self.is_busy,
-                egui::Button::new(RichText::new("↻ Restaurer les paramètres cochés").strong()),
+                egui::Button::new(RichText::new(l.tr("↻ Restore Checked Settings", "↻ Restaurer les paramètres cochés")).strong()),
             )
-            .on_hover_text("Applique immédiatement les restaurations sélectionnées ci-dessus.")
+            .on_hover_text(l.tr(
+                "Immediately applies checked restorations above.",
+                "Applique immédiatement les restaurations sélectionnées ci-dessus.",
+            ))
             .clicked()
         {
             self.spawn_restore();
@@ -2109,14 +2576,18 @@ impl WinCareApp {
     }
 
     fn render_log_panel(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("• Console d'exécution & Journal Temps Réel").strong());
+            ui.label(RichText::new(l.tr(
+                "• Execution Console & Real-Time Log",
+                "• Console d'exécution & Journal Temps Réel",
+            )).strong());
             ui.label(RichText::new(format!("({})", self.log_file_path.display())).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Effacer").clicked() {
+                if ui.small_button(l.tr("Clear", "Effacer")).clicked() {
                     self.logs.clear();
                 }
-                ui.checkbox(&mut self.auto_scroll_logs, "Défilement auto");
+                ui.checkbox(&mut self.auto_scroll_logs, l.tr("Auto-scroll", "Défilement auto"));
             });
         });
         ui.separator();
@@ -2141,15 +2612,15 @@ impl WinCareApp {
     }
 }
 
-fn render_diff_table(ui: &mut egui::Ui, id: &str, diffs: &[MetricDiff]) {
+fn render_diff_table(ui: &mut egui::Ui, id: &str, diffs: &[MetricDiff], lang: Lang) {
     egui::Grid::new(id)
         .striped(true)
         .num_columns(4)
         .show(ui, |ui| {
-            ui.strong("Métrique");
-            ui.strong("Avant");
-            ui.strong("Après");
-            ui.strong("Delta");
+            ui.strong(lang.tr("Metric", "Métrique"));
+            ui.strong(lang.tr("Before", "Avant"));
+            ui.strong(lang.tr("After", "Après"));
+            ui.strong(lang.tr("Delta", "Delta"));
             ui.end_row();
 
             for d in diffs {
@@ -2199,5 +2670,31 @@ impl eframe::App for WinCareApp {
                     ActiveTab::Restore => self.render_restore_tab(ui),
                 });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_active_tab_labels_bilingual() {
+        assert_eq!(ActiveTab::Overview.label(Lang::En), "🏠 Overview");
+        assert_eq!(ActiveTab::Overview.label(Lang::Fr), "🏠 Vue d'ensemble");
+
+        assert_eq!(ActiveTab::Repair.label(Lang::En), "🛠 Windows Repair");
+        assert_eq!(ActiveTab::Repair.label(Lang::Fr), "🛠 Réparation Windows");
+
+        assert_eq!(ActiveTab::BoostPc.label(Lang::En), "⚡ Boost PC");
+        assert_eq!(ActiveTab::BoostPc.label(Lang::Fr), "⚡ Boost PC");
+
+        assert_eq!(ActiveTab::BoostNet.label(Lang::En), "🌐 Boost Internet");
+        assert_eq!(ActiveTab::BoostNet.label(Lang::Fr), "🌐 Boost Internet");
+
+        assert_eq!(ActiveTab::Debloat.label(Lang::En), "🧹 Debloat & Tweaks");
+        assert_eq!(ActiveTab::Debloat.label(Lang::Fr), "🧹 Debloat & Tweaks");
+
+        assert_eq!(ActiveTab::Restore.label(Lang::En), "↩ Restore (.RESTORE)");
+        assert_eq!(ActiveTab::Restore.label(Lang::Fr), "↩ Restauration (.RESTORE)");
     }
 }
