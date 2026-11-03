@@ -1,6 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod app;
+pub mod appx;
+pub mod gaming;
+pub mod hardware;
+pub mod profile;
+pub mod scheduler;
+pub mod winget;
 pub mod boost_net;
 pub mod boost_pc;
 pub mod cli;

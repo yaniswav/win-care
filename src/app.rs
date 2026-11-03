@@ -2,9 +2,10 @@ use crate::i18n::{debloat_category_title, debloat_tweak_text, repair_task_text, 
 use crate::logger::Logger;
 use crate::runner::Runner;
 use crate::types::{
-    DebloatCategory, DebloatTweakStatus, LogEntry, LogLevel, MetricDiff, NetDiagnosis,
-    NetOptimOptions, PcCleanOptions, PcDiagnosis, PcOptimOptions, RepairTask, RestoreOptions,
-    StartupItem, TempSubfolderInfo, WorkerEvent,
+    AppxBloatItem, BatteryAndSmartInfo, DebloatCategory, DebloatTweakStatus, GamingStatus,
+    LogEntry, LogLevel, MetricDiff, NetDiagnosis, NetOptimOptions, PcCleanOptions, PcDiagnosis,
+    PcOptimOptions, RepairTask, RestoreOptions, StartupItem, TempSubfolderInfo, WinCareProfile,
+    WingetUpgradeItem, WorkerEvent,
 };
 use eframe::egui::{self, Color32, RichText};
 use std::collections::HashSet;
@@ -19,6 +20,8 @@ pub enum ActiveTab {
     BoostPc,
     BoostNet,
     Debloat,
+    Apps,
+    GamingHardware,
     Restore,
 }
 
@@ -30,6 +33,8 @@ impl ActiveTab {
             ActiveTab::BoostPc => lang.tr("⚡ Boost PC", "⚡ Boost PC"),
             ActiveTab::BoostNet => lang.tr("🌐 Boost Internet", "🌐 Boost Internet"),
             ActiveTab::Debloat => lang.tr("🧹 Debloat & Tweaks", "🧹 Debloat & Tweaks"),
+            ActiveTab::Apps => lang.tr("📦 Apps & Bloatware", "📦 Logiciels & Bloatwares"),
+            ActiveTab::GamingHardware => lang.tr("🎮 Gaming & Hardware", "🎮 Gaming & Matériel"),
             ActiveTab::Restore => lang.tr("↩ Restore (.RESTORE)", "↩ Restauration (.RESTORE)"),
         }
     }
@@ -203,6 +208,19 @@ pub struct WinCareApp {
     // Onglet Debloat Win11
     debloat_tweaks: Vec<DebloatTweakStatus>,
 
+    // Onglet Apps & Bloatware
+    winget_items: Vec<WingetUpgradeItem>,
+    selected_winget_ids: HashSet<String>,
+    appx_items: Vec<AppxBloatItem>,
+    selected_appx_patterns: HashSet<String>,
+
+    // Onglet Gaming & Hardware
+    gaming_status: Option<GamingStatus>,
+    battery_smart: Option<BatteryAndSmartInfo>,
+
+    // Maintenance planifiée
+    weekly_task_enabled: bool,
+
     // Auto-update GitHub
     update_info: Option<crate::updater::UpdateInfo>,
 
@@ -248,6 +266,18 @@ impl WinCareApp {
 
         let startup_items = crate::boost_pc::list_startup_items();
         let debloat_tweaks = crate::debloat::list_debloat_tweaks();
+        let appx_items = crate::appx::get_default_bloatware_list();
+        let weekly_task_enabled = crate::scheduler::is_weekly_task_enabled();
+
+        // Requête en arrière-plan au démarrage pour charger la configuration Gaming
+        {
+            let runner_init = Logger::new(Some(tx.clone()), false);
+            let r_init = Runner::new(runner_init, dry_run);
+            std::thread::spawn(move || {
+                let status = crate::gaming::query_gaming_status(&r_init);
+                r_init.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            });
+        }
 
         Self {
             is_admin,
@@ -277,6 +307,13 @@ impl WinCareApp {
             net_diffs: Vec::new(),
             include_speedtest: false,
             debloat_tweaks,
+            winget_items: Vec::new(),
+            selected_winget_ids: HashSet::new(),
+            appx_items,
+            selected_appx_patterns: HashSet::new(),
+            gaming_status: None,
+            battery_smart: None,
+            weekly_task_enabled,
             update_info: None,
             restore_opts: RestoreOptions::default(),
         }
@@ -326,6 +363,42 @@ impl WinCareApp {
                 }
                 WorkerEvent::UpdateCheckReady(info) => {
                     self.update_info = info;
+                }
+                WorkerEvent::WingetListReady(items) => {
+                    self.selected_winget_ids.clear();
+                    for item in &items {
+                        self.selected_winget_ids.insert(item.id.clone());
+                    }
+                    self.winget_items = items;
+                }
+                WorkerEvent::AppxListReady(items) => {
+                    self.selected_appx_patterns.clear();
+                    for item in &items {
+                        if item.installed {
+                            self.selected_appx_patterns.insert(item.package_pattern.clone());
+                        }
+                    }
+                    self.appx_items = items;
+                }
+                WorkerEvent::GamingStatusReady(status) => {
+                    self.gaming_status = Some(status);
+                }
+                WorkerEvent::BatterySmartReady(info) => {
+                    self.battery_smart = Some(info);
+                }
+                WorkerEvent::WeeklyTaskStatusReady(enabled) => {
+                    self.weekly_task_enabled = enabled;
+                }
+                WorkerEvent::ProfileImported(prof) => {
+                    self.selected_repairs = prof.repair_tasks.into_iter().collect();
+                    self.pc_clean_opts = prof.pc_clean;
+                    self.pc_optim_opts = prof.pc_optim;
+                    self.net_optim_opts = prof.net_optim;
+                    let runner = self.make_runner();
+                    for id in &prof.debloat_applied_ids {
+                        crate::debloat::set_debloat_tweak(&runner, id, true);
+                    }
+                    self.debloat_tweaks = crate::debloat::list_debloat_tweaks();
                 }
                 WorkerEvent::TaskFinished { title, need_reboot } => {
                     self.is_busy = false;
@@ -705,6 +778,430 @@ impl WinCareApp {
         });
     }
 
+    fn spawn_export_profile(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr("Exporting profile...", "Exportation du profil...")
+            .to_string();
+        let runner = self.make_runner();
+        let applied_debloat: Vec<String> = self
+            .debloat_tweaks
+            .iter()
+            .filter(|t| t.is_applied)
+            .map(|t| t.id.clone())
+            .collect();
+        let prof = WinCareProfile {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            repair_tasks: self.selected_repairs.iter().copied().collect(),
+            pc_clean: self.pc_clean_opts.clone(),
+            pc_optim: self.pc_optim_opts.clone(),
+            net_optim: self.net_optim_opts.clone(),
+            debloat_applied_ids: applied_debloat,
+        };
+        std::thread::spawn(move || {
+            crate::profile::export_profile(&runner, &prof);
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Export profil".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_import_profile(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr("Importing profile...", "Importation du profil...")
+            .to_string();
+        let runner = self.make_runner();
+        let default_path = crate::profile::default_profile_path();
+        std::thread::spawn(move || {
+            if let Some(prof) = crate::profile::import_profile(&runner, &default_path) {
+                runner.logger.send_event(WorkerEvent::ProfileImported(prof));
+            }
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Import profil".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_toggle_weekly_task(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        let target = !self.weekly_task_enabled;
+        self.progress_label = if target {
+            self.lang
+                .tr(
+                    "Activating weekly maintenance task...",
+                    "Activation de la tâche de maintenance hebdomadaire...",
+                )
+                .to_string()
+        } else {
+            self.lang
+                .tr(
+                    "Disabling weekly maintenance task...",
+                    "Désactivation de la tâche de maintenance hebdomadaire...",
+                )
+                .to_string()
+        };
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            let ok = crate::scheduler::set_weekly_task(&runner, target);
+            if ok {
+                runner
+                    .logger
+                    .send_event(WorkerEvent::WeeklyTaskStatusReady(target));
+            } else {
+                let current = crate::scheduler::is_weekly_task_enabled();
+                runner
+                    .logger
+                    .send_event(WorkerEvent::WeeklyTaskStatusReady(current));
+            }
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Tâche de maintenance hebdomadaire".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_scan_winget(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_current = 1;
+        self.progress_total = 1;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Scanning for software upgrades via WinGet...",
+                "Recherche des mises à jour logicielles via WinGet...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            let items = crate::winget::scan_winget_upgrades(&runner);
+            runner.logger.send_event(WorkerEvent::WingetListReady(items));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Scan WinGet".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_upgrade_winget(&mut self, ids: Vec<String>) {
+        if self.is_busy || ids.is_empty() {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_current = 0;
+        self.progress_total = ids.len();
+        self.progress_label = self
+            .lang
+            .tr(
+                "Upgrading selected packages via WinGet...",
+                "Mise à jour des paquets sélectionnés via WinGet...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::winget::upgrade_winget_packages(&runner, &ids);
+            let items = crate::winget::scan_winget_upgrades(&runner);
+            runner.logger.send_event(WorkerEvent::WingetListReady(items));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Mise à jour WinGet".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_upgrade_all_winget(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_current = 1;
+        self.progress_total = 1;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Upgrading all packages via WinGet (--all --silent)...",
+                "Mise à jour globale de tous les logiciels via WinGet...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::winget::upgrade_all_winget(&runner);
+            let items = crate::winget::scan_winget_upgrades(&runner);
+            runner.logger.send_event(WorkerEvent::WingetListReady(items));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Mise à jour globale WinGet".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_scan_appx(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_current = 1;
+        self.progress_total = 1;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Scanning installed Windows AppX bloatware...",
+                "Analyse des Bloatwares Windows AppX installés...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            let items = crate::appx::scan_appx_bloatware(&runner);
+            runner.logger.send_event(WorkerEvent::AppxListReady(items));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Scan Bloatwares AppX".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_remove_appx(&mut self, patterns: Vec<String>) {
+        if self.is_busy || patterns.is_empty() {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_current = 0;
+        self.progress_total = patterns.len();
+        self.progress_label = self
+            .lang
+            .tr(
+                "Uninstalling selected Windows AppX bloatware...",
+                "Désinstallation des Bloatwares Windows AppX sélectionnés...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::appx::remove_appx_packages(&runner, &patterns);
+            let items = crate::appx::scan_appx_bloatware(&runner);
+            runner.logger.send_event(WorkerEvent::AppxListReady(items));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Suppression Bloatwares AppX".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_refresh_gaming_status(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Querying gaming configuration and shader caches...",
+                "Vérification des réglages gaming et caches shaders...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "État Gaming".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_clean_shader_caches(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Purging GPU shader caches (NVIDIA, AMD, DirectX)...",
+                "Purge des caches de shaders GPU (NVIDIA, AMD, DirectX)...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::gaming::clean_gpu_shader_caches(&runner);
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Purge Caches Shaders GPU".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_enable_ultimate_plan(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Activating Ultimate Performance power scheme...",
+                "Activation du mode Performances Ultimes...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::gaming::enable_ultimate_power_plan(&runner);
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Mode Performances Ultimes".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_set_hags(&mut self, enabled: bool) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = if enabled {
+            self.lang
+                .tr("Enabling HAGS...", "Activation de HAGS...")
+                .to_string()
+        } else {
+            self.lang
+                .tr("Disabling HAGS...", "Désactivation de HAGS...")
+                .to_string()
+        };
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::gaming::set_hags(&runner, enabled);
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Réglage HAGS".to_string(),
+                need_reboot: true,
+            });
+        });
+    }
+
+    fn spawn_set_vbs(&mut self, enabled: bool) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = if enabled {
+            self.lang
+                .tr("Enabling VBS...", "Activation de VBS...")
+                .to_string()
+        } else {
+            self.lang
+                .tr("Disabling VBS...", "Désactivation de VBS...")
+                .to_string()
+        };
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::gaming::set_vbs(&runner, enabled);
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Réglage VBS / Intégrité mémoire".to_string(),
+                need_reboot: true,
+            });
+        });
+    }
+
+    fn spawn_set_game_mode(&mut self, enabled: bool) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = if enabled {
+            self.lang
+                .tr(
+                    "Enabling Windows Game Mode...",
+                    "Activation du Mode Jeu Windows...",
+                )
+                .to_string()
+        } else {
+            self.lang
+                .tr(
+                    "Disabling Windows Game Mode...",
+                    "Désactivation du Mode Jeu Windows...",
+                )
+                .to_string()
+        };
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::gaming::set_game_mode(&runner, enabled);
+            let status = crate::gaming::query_gaming_status(&runner);
+            runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Mode Jeu Windows".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_scan_battery_smart(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Scanning battery health and disk S.M.A.R.T. counters...",
+                "Diagnostic de la santé batterie et compteurs S.M.A.R.T. disques...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            let info = crate::hardware::scan_battery_and_smart(&runner);
+            runner.logger.send_event(WorkerEvent::BatterySmartReady(info));
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Diagnostic Batterie & SMART".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
+    fn spawn_generate_battery_report(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        self.progress_label = self
+            .lang
+            .tr(
+                "Generating Windows battery report on Desktop...",
+                "Génération du rapport de batterie sur le Bureau...",
+            )
+            .to_string();
+        let runner = self.make_runner();
+        std::thread::spawn(move || {
+            crate::hardware::generate_battery_report(&runner);
+            runner.logger.send_event(WorkerEvent::TaskFinished {
+                title: "Rapport de batterie".to_string(),
+                need_reboot: false,
+            });
+        });
+    }
+
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         let l = self.lang;
         ui.horizontal(|ui| {
@@ -939,6 +1436,24 @@ impl WinCareApp {
             .on_hover_text(l.tr(
                 "Disable Copilot, Windows Recall, Bing, Telemetry, Widgets, and restore classic Windows 10 context menu.",
                 "Désactivation de Copilot, Windows Recall, Bing, Télémétrie, Widgets et activation du clic-droit classique Windows 10.",
+            ));
+            ui.selectable_value(
+                &mut self.active_tab,
+                ActiveTab::Apps,
+                ActiveTab::Apps.label(l),
+            )
+            .on_hover_text(l.tr(
+                "Winget package updater and pre-installed Windows AppX bloatware uninstaller.",
+                "Mise à jour des logiciels via WinGet et désinstallation des Bloatwares AppX préinstallés.",
+            ));
+            ui.selectable_value(
+                &mut self.active_tab,
+                ActiveTab::GamingHardware,
+                ActiveTab::GamingHardware.label(l),
+            )
+            .on_hover_text(l.tr(
+                "Gaming performance tweaks, GPU shader caches cleaner, battery health, and disk SMART monitoring.",
+                "Optimisations gaming, nettoyage des caches shaders GPU, santé batterie et surveillance SMART des disques.",
             ));
             ui.selectable_value(
                 &mut self.active_tab,
@@ -1255,6 +1770,182 @@ impl WinCareApp {
                             .weak(),
                     );
                 }
+            });
+        });
+
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(l.tr(
+                        "⏰ Scheduled Maintenance & Config Profile (.JSON)",
+                        "⏰ Maintenance Automatique & Profil (.JSON)",
+                    ))
+                    .color(Color32::from_rgb(120, 210, 255)),
+                );
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                let switch_text = if self.weekly_task_enabled {
+                    RichText::new(l.tr(
+                        "⏰ Weekly Maintenance (Sunday 12:00) [ON]",
+                        "⏰ Maintenance Hebdomadaire (Dimanche 12h) [ON]",
+                    ))
+                    .color(Color32::from_rgb(80, 225, 130))
+                    .strong()
+                } else {
+                    RichText::new(l.tr(
+                        "⏰ Weekly Maintenance (Sunday 12:00) [OFF]",
+                        "⏰ Maintenance Hebdomadaire (Dimanche 12h) [OFF]",
+                    ))
+                    .color(Color32::from_rgb(180, 180, 180))
+                };
+
+                let task_tooltip_title = l.tr(
+                    "Scheduled Weekly Maintenance (Sunday 12:00)",
+                    "Maintenance Hebdomadaire Automatique (Dimanche 12h00)",
+                );
+                let task_tooltip_details = l.tr(
+                    "▪ Default: No automatic maintenance task is registered in Windows Task Scheduler.\n▪ If enabled: Schedules a silent background maintenance every Sunday at 12:00 PM (runs --boost-pc without elevation prompt).\n▪ If skipped: Maintenance must be run manually from WinCare whenever desired.",
+                    "▪ Par défaut : Aucune tâche planifiée automatique n'est enregistrée dans le Planificateur Windows.\n▪ Si utilisé : Enregistre une tâche hebdomadaire silencieuse chaque dimanche à 12h00 (lance --boost-pc automatiquement en tâche de fond).\n▪ Si non utilisé : Vous effectuez les maintenances manuellement depuis WinCare quand vous le souhaitez.",
+                );
+                let task_tooltip_safety = l.tr(
+                    "✔ Runs silently in the background with normal privileges",
+                    "✔ Exécution silencieuse et autonome avec privilèges normaux",
+                );
+
+                if ui
+                    .add_enabled(!self.is_busy, egui::Button::new(switch_text))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            task_tooltip_title,
+                            task_tooltip_details,
+                            task_tooltip_safety,
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_toggle_weekly_task();
+                }
+
+                ui.label(
+                    RichText::new("[?]")
+                        .color(Color32::from_rgb(95, 195, 250))
+                        .small()
+                        .strong(),
+                )
+                .on_hover_ui(|ui| {
+                    show_rich_tooltip(
+                        ui,
+                        task_tooltip_title,
+                        task_tooltip_details,
+                        task_tooltip_safety,
+                        false,
+                    );
+                });
+
+                ui.separator();
+
+                let export_tooltip_title =
+                    l.tr("Export Configuration Profile", "Exporter le profil de configuration");
+                let export_tooltip_details = l.tr(
+                    "▪ Default: Settings and tweak selections are only preserved in memory during current session.\n▪ If enabled: Exports current repair choices, PC clean & optim options, network settings, and active debloat tweaks to Desktop\\wincare-profile.json.\n▪ If skipped: Settings are not saved to an external JSON configuration file.",
+                    "▪ Par défaut : Les sélections d'options et de tweaks sont conservées uniquement en mémoire pendant la session.\n▪ Si utilisé : Exporte vos choix de réparations, options de nettoyage, optimisation réseau et tweaks debloat actifs vers Bureau\\wincare-profile.json.\n▪ Si non utilisé : Les réglages ne sont pas sauvegardés dans un fichier JSON externe.",
+                );
+                let export_tooltip_safety = l.tr(
+                    "✔ Portable JSON backup file for rapid deployment on other PCs",
+                    "✔ Fichier JSON facilement transférable pour configurer rapidement d'autres machines",
+                );
+
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr(
+                            "💾 Export my profile (Desktop\\wincare-profile.json)",
+                            "💾 Exporter mon profil (Desktop\\wincare-profile.json)",
+                        )),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            export_tooltip_title,
+                            export_tooltip_details,
+                            export_tooltip_safety,
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_export_profile();
+                }
+
+                ui.label(
+                    RichText::new("[?]")
+                        .color(Color32::from_rgb(95, 195, 250))
+                        .small()
+                        .strong(),
+                )
+                .on_hover_ui(|ui| {
+                    show_rich_tooltip(
+                        ui,
+                        export_tooltip_title,
+                        export_tooltip_details,
+                        export_tooltip_safety,
+                        false,
+                    );
+                });
+
+                let import_tooltip_title =
+                    l.tr("Import Configuration Profile", "Importer un profil de configuration");
+                let import_tooltip_details = l.tr(
+                    "▪ Default: Retains current in-app selections and active system settings.\n▪ If enabled: Loads and restores repair tasks, PC clean/optim options, network options, and automatically applies debloat tweaks from Desktop\\wincare-profile.json.\n▪ If skipped: Retains currently loaded configuration without loading from disk.",
+                    "▪ Par défaut : Conserve les réglages actuellement configurés dans l'interface.\n▪ Si utilisé : Charge et restaure les tâches de réparation, options PC/réseau et réapplique automatiquement les tweaks debloat listés dans Bureau\\wincare-profile.json.\n▪ Si non utilisé : Conserve la configuration active sans modifier les cases cochées.",
+                );
+                let import_tooltip_safety = l.tr(
+                    "✔ Instantly applies all saved tweaks and options",
+                    "✔ Restaure instantanément l'intégralité de vos options favorites",
+                );
+
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr(
+                            "📂 Import a profile (Desktop\\wincare-profile.json)",
+                            "📂 Importer un profil (Desktop\\wincare-profile.json)",
+                        )),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            import_tooltip_title,
+                            import_tooltip_details,
+                            import_tooltip_safety,
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_import_profile();
+                }
+
+                ui.label(
+                    RichText::new("[?]")
+                        .color(Color32::from_rgb(95, 195, 250))
+                        .small()
+                        .strong(),
+                )
+                .on_hover_ui(|ui| {
+                    show_rich_tooltip(
+                        ui,
+                        import_tooltip_title,
+                        import_tooltip_details,
+                        import_tooltip_safety,
+                        false,
+                    );
+                });
             });
         });
     }
@@ -2430,6 +3121,753 @@ impl WinCareApp {
         }
     }
 
+    fn render_apps_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
+        ui.heading(l.tr(
+            "Application Management & Bloatware Removal",
+            "Gestion des Applications & Nettoyage Bloatwares",
+        ));
+        ui.label(l.tr(
+            "Update installed desktop applications via WinGet and uninstall superfluous Windows 10/11 AppX bloatware.",
+            "Mettez à jour vos applications installées via WinGet et désinstallez les bloatwares AppX superflus de Windows 10/11.",
+        ));
+        ui.add_space(8.0);
+
+        // Section 1: WinGet Updates
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(l.tr("📦 Software Upgrades (WinGet)", "📦 Mises à jour de logiciels (WinGet)"))
+                        .color(Color32::from_rgb(100, 210, 255)),
+                );
+            });
+            ui.add_space(2.0);
+            ui.label(l.tr(
+                "Detect and upgrade outdated software packages using official Windows Package Manager (winget).",
+                "Détectez et mettez à jour vos logiciels obsolètes via le gestionnaire officiel Windows Package Manager (winget).",
+            ));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr("🔍 Scan for Updates (WinGet)", "🔍 Scanner les mises à jour (WinGet)")),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Scan WinGet Updates", "Scanner les mises à jour WinGet"),
+                            l.tr(
+                                "▪ Default: No software upgrade scan is conducted until requested.\n▪ If enabled: Interrogates winget repository for available updates across all installed applications.\n▪ If skipped: Installed applications remain at their current versions.",
+                                "▪ Par défaut : Aucun scan de mise à jour des logiciels n'est effectué tant qu'il n'est pas demandé.\n▪ Si utilisé : Interroge le dépôt officiel WinGet pour répertorier les nouvelles versions disponibles de vos applications.\n▪ Si non utilisé : Vos logiciels restent dans leurs versions actuelles.",
+                            ),
+                            l.tr("✔ 100% read-only scan", "✔ Scan 100 % en lecture seule"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_scan_winget();
+                }
+
+                let sel_count = self.selected_winget_ids.len();
+                let upgrade_sel_label = match l {
+                    Lang::En => format!("⬆ Upgrade Selected ({sel_count})"),
+                    Lang::Fr => format!("⬆ Mettre à jour la sélection ({sel_count})"),
+                };
+                if ui
+                    .add_enabled(
+                        !self.is_busy && sel_count > 0,
+                        egui::Button::new(upgrade_sel_label),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Upgrade Selected Packages", "Mettre à jour les paquets sélectionnés"),
+                            l.tr(
+                                "▪ Default: Selected packages are not upgraded.\n▪ If enabled: Runs silent installer upgrade for each checked package via winget.\n▪ If skipped: Checked packages remain unchanged.",
+                                "▪ Par défaut : Les paquets sélectionnés ne sont pas mis à jour.\n▪ Si utilisé : Lance l'installation silencieuse de la dernière version pour chaque paquet coché via winget.\n▪ Si non utilisé : Les logiciels cochés restent inchangés.",
+                            ),
+                            l.tr("✔ Installs official verified packages", "✔ Installe les paquets officiels vérifiés"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    let ids: Vec<String> = self.selected_winget_ids.iter().cloned().collect();
+                    self.spawn_upgrade_winget(ids);
+                }
+
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr("🚀 Upgrade All (--silent)", "🚀 Tout mettre à jour (Upgrade All --silent)")),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Upgrade All Packages", "Mise à jour globale de tous les logiciels"),
+                            l.tr(
+                                "▪ Default: Software packages are only updated on demand.\n▪ If enabled: Executes winget upgrade --all --silent to update every outdated program on the machine.\n▪ If skipped: Outdated software remains at current versions.",
+                                "▪ Par défaut : Les logiciels sont mis à jour au cas par cas.\n▪ Si utilisé : Lance winget upgrade --all --silent pour actualiser l'intégralité des applications obsolètes du système.\n▪ Si non utilisé : Les logiciels obsolètes ne sont pas mis à jour en masse.",
+                            ),
+                            l.tr("✔ Automated unattended upgrades", "✔ Mises à jour automatisées et sans invite"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_upgrade_all_winget();
+                }
+
+                if !self.winget_items.is_empty() {
+                    ui.separator();
+                    if ui.small_button(l.tr("Select all", "Tout cocher")).clicked() {
+                        for item in &self.winget_items {
+                            self.selected_winget_ids.insert(item.id.clone());
+                        }
+                    }
+                    if ui.small_button(l.tr("Deselect all", "Tout décocher")).clicked() {
+                        self.selected_winget_ids.clear();
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            if self.winget_items.is_empty() {
+                ui.label(RichText::new(l.tr(
+                    "No updates detected or scan not performed yet. Click 'Scan for Updates (WinGet)' to check.",
+                    "Aucune mise à jour détectée ou scan non effectué. Cliquez sur 'Scanner les mises à jour (WinGet)'.",
+                )).weak());
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("winget_list_scroll")
+                    .max_height(250.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("winget_table_grid")
+                            .striped(true)
+                            .min_col_width(60.0)
+                            .show(ui, |ui| {
+                                ui.strong("");
+                                ui.strong(l.tr("Application", "Application"));
+                                ui.strong(l.tr("ID", "Identifiant"));
+                                ui.strong(l.tr("Current", "Version Actuelle"));
+                                ui.strong("");
+                                ui.strong(l.tr("Available", "Disponible"));
+                                ui.end_row();
+
+                                for item in &self.winget_items {
+                                    let mut is_selected = self.selected_winget_ids.contains(&item.id);
+                                    if ui.checkbox(&mut is_selected, "").changed() {
+                                        if is_selected {
+                                            self.selected_winget_ids.insert(item.id.clone());
+                                        } else {
+                                            self.selected_winget_ids.remove(&item.id);
+                                        }
+                                    }
+                                    ui.label(RichText::new(&item.name).strong());
+                                    ui.label(RichText::new(&item.id).weak());
+                                    ui.label(&item.current_version);
+                                    ui.label("→");
+                                    ui.label(RichText::new(&item.available_version).color(Color32::from_rgb(80, 225, 130)).strong());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // Section 2: AppX Bloatware
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(l.tr("🗑 Pre-installed Bloatware Uninstaller (AppX)", "🗑 Désinstallateur de Bloatwares Windows préinstallés (AppX)"))
+                        .color(Color32::from_rgb(255, 140, 140)),
+                );
+            });
+            ui.add_space(2.0);
+            ui.label(l.tr(
+                "Safely removes non-essential pre-installed UWP/AppX packages and prevents automatic provisioning for new users.",
+                "Supprime en toute sécurité les paquets UWP/AppX préinstallés superflus et bloque leur réinstallation pour les nouveaux profils.",
+            ));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr("🔍 Check Installed Bloatware", "🔍 Vérifier les Bloatwares installés")),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Check Installed Bloatware", "Vérifier les Bloatwares installés"),
+                            l.tr(
+                                "▪ Default: Bloatware presence is evaluated from default catalog.\n▪ If enabled: Scans Get-AppxPackage to detect which of the 14 known superfluous apps are actually installed.\n▪ If skipped: AppX installation status is not queried.",
+                                "▪ Par défaut : La présence des bloatwares est affichée selon le catalogue par défaut.\n▪ Si utilisé : Interroge Get-AppxPackage pour détecter quelles applications superflues parmi les 14 sont réellement installées.\n▪ Si non utilisé : L'état d'installation AppX n'est pas interrogé.",
+                            ),
+                            l.tr("✔ 100% read-only scan", "✔ Scan 100 % en lecture seule"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_scan_appx();
+                }
+
+                let sel_appx_count = self.selected_appx_patterns.len();
+                let uninst_label = match l {
+                    Lang::En => format!("🗑 Uninstall Checked Bloatware ({sel_appx_count})"),
+                    Lang::Fr => format!("🗑 Désinstaller les Bloatwares cochés ({sel_appx_count})"),
+                };
+                if ui
+                    .add_enabled(
+                        !self.is_busy && sel_appx_count > 0,
+                        egui::Button::new(uninst_label),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Uninstall Selected Bloatware", "Désinstaller les Bloatwares cochés"),
+                            l.tr(
+                                "▪ Default: Pre-installed AppX apps remain present on current and future user accounts.\n▪ If enabled: Removes chosen AppX packages and provisioned templates for current and new user accounts.\n▪ If skipped: No apps will be uninstalled.",
+                                "▪ Par défaut : Les applications AppX préinstallées restent présentes sur les comptes utilisateurs.\n▪ Si utilisé : Supprime les paquets AppX et leurs modèles provisionnés pour l'utilisateur actuel et les futurs comptes.\n▪ Si non utilisé : Aucune application n'est désinstallée.",
+                            ),
+                            l.tr("✔ Safe removal without affecting core Windows features", "✔ Suppression propre sans impacter les composants essentiels de Windows"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    let patterns: Vec<String> = self.selected_appx_patterns.iter().cloned().collect();
+                    self.spawn_remove_appx(patterns);
+                }
+
+                ui.separator();
+                if ui.small_button(l.tr("Select installed", "Cocher installés")).clicked() {
+                    for item in &self.appx_items {
+                        if item.installed {
+                            self.selected_appx_patterns.insert(item.package_pattern.clone());
+                        }
+                    }
+                }
+                if ui.small_button(l.tr("Select all", "Tout cocher")).clicked() {
+                    for item in &self.appx_items {
+                        self.selected_appx_patterns.insert(item.package_pattern.clone());
+                    }
+                }
+                if ui.small_button(l.tr("Deselect all", "Tout décocher")).clicked() {
+                    self.selected_appx_patterns.clear();
+                }
+            });
+
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt("appx_list_scroll")
+                .max_height(350.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("appx_table_grid")
+                        .striped(true)
+                        .min_col_width(50.0)
+                        .show(ui, |ui| {
+                            ui.strong("");
+                            ui.strong(l.tr("Application", "Application"));
+                            ui.strong(l.tr("Status", "État"));
+                            ui.strong(l.tr("Description", "Description"));
+                            ui.strong("");
+                            ui.end_row();
+
+                            for item in &self.appx_items {
+                                let mut is_selected = self.selected_appx_patterns.contains(&item.package_pattern);
+                                if ui.checkbox(&mut is_selected, "").changed() {
+                                    if is_selected {
+                                        self.selected_appx_patterns.insert(item.package_pattern.clone());
+                                    } else {
+                                        self.selected_appx_patterns.remove(&item.package_pattern);
+                                    }
+                                }
+
+                                ui.label(RichText::new(&item.display_name).strong());
+
+                                if item.installed {
+                                    ui.label(RichText::new(l.tr("[Installed]", "[Installé]")).color(Color32::from_rgb(255, 120, 120)).strong());
+                                } else {
+                                    ui.label(RichText::new(l.tr("[Not installed]", "[Non installé]")).color(Color32::from_rgb(100, 210, 120)));
+                                }
+
+                                let desc = if l == Lang::Fr {
+                                    &item.description_fr
+                                } else {
+                                    &item.description_en
+                                };
+                                ui.label(desc);
+
+                                let item_title = &item.display_name;
+                                let details = match l {
+                                    Lang::En => format!(
+                                        "▪ Default: Pre-installed with Windows 10/11.\n▪ If enabled: Completely removes {} from the system and disables automated provisioning.\n▪ If skipped: Retains the application on the system.",
+                                        item.display_name
+                                    ),
+                                    Lang::Fr => format!(
+                                        "▪ Par défaut : Préinstallé avec Windows 10/11.\n▪ Si utilisé : Supprime complètement {} du système et empêche son approvisionnement automatique.\n▪ Si non utilisé : Conserve l'application sur le système.",
+                                        item.display_name
+                                    ),
+                                };
+                                let safety = l.tr("✔ Can be reinstalled from Microsoft Store if ever needed", "✔ Réinstallable depuis le Microsoft Store si nécessaire");
+
+                                ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
+                                    .on_hover_ui(|ui| {
+                                        show_rich_tooltip(ui, item_title, &details, safety, false);
+                                    });
+
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    }
+
+    fn render_gaming_hardware_tab(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang;
+        ui.heading(l.tr(
+            "Gaming Optimization, Latency & Hardware Health",
+            "Optimisation Gaming, Latence & Matériel",
+        ));
+        ui.label(l.tr(
+            "GPU shader caches purging, low latency OS settings, battery capacity analysis, and storage SMART counters.",
+            "Purge des caches shaders GPU, réglages OS basse latence, santé batterie et compteurs SMART des disques.",
+        ));
+        ui.add_space(8.0);
+
+        // Section 1: Gaming Optimizations & Shader Caches
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(l.tr(
+                        "🎮 Gaming Optimizations, Latency & GPU Shader Caches",
+                        "🎮 Optimisations Gaming, Latence & Caches Shaders GPU",
+                    ))
+                    .color(Color32::from_rgb(255, 195, 90)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.is_busy,
+                            egui::Button::new(l.tr(
+                                "🔄 Refresh Gaming Status & Shader Caches",
+                                "🔄 Actualiser l'état Gaming & Caches Shaders",
+                            )),
+                        )
+                        .on_hover_text(l.tr(
+                            "Queries registry and measures current DirectX/NVIDIA/AMD shader caches sizes.",
+                            "Interroge le registre et mesure la taille actuelle des caches shaders DirectX/NVIDIA/AMD.",
+                        ))
+                        .clicked()
+                    {
+                        self.spawn_refresh_gaming_status();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            ui.columns(2, |cols| {
+                // Card: GPU Shader Cache
+                cols[0].group(|ui| {
+                    ui.label(RichText::new(l.tr("• GPU Shader Cache Cleaner", "• Nettoyeur de Cache Shaders GPU")).strong());
+                    let sz = self.gaming_status.as_ref().map(|s| s.shader_cache_size_mb).unwrap_or(0);
+                    ui.label(format!("{}: {} MB", l.tr("Shader cache size", "Taille du cache de shaders"), sz));
+                    ui.add_space(2.0);
+                    ui.label(l.tr(
+                        "Covers NVIDIA (DXCache, GLCache), AMD (DxCache, OglCache), and DirectX (D3DSCache).",
+                        "Nettoie NVIDIA (DXCache, GLCache), AMD (DxCache, OglCache) et DirectX (D3DSCache).",
+                    ));
+                    ui.add_space(4.0);
+
+                    if ui
+                        .add_enabled(
+                            !self.is_busy,
+                            egui::Button::new(l.tr(
+                                "🧹 Purge GPU Shader Caches",
+                                "🧹 Purger les Caches de Shaders GPU",
+                            )),
+                        )
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Purge GPU Shader Caches", "Purger les Caches de Shaders GPU"),
+                                l.tr(
+                                    "▪ Default: GPU shader cache files accumulate over time in DirectX, NVIDIA, and AMD driver folders.\n▪ If enabled: Safely deletes compiled shader caches to resolve stuttering, corrupted textures, and reclaim disk space (rebuilds automatically on next game launch).\n▪ If skipped: Existing compiled shader caches are kept.",
+                                    "▪ Par défaut : Les fichiers de shaders compilés s'accumulent indéfiniment dans les répertoires DirectX, NVIDIA et AMD.\n▪ Si utilisé : Supprime les caches obsolètes pour corriger les micro-saccades (stuttering), textures corrompues et libérer de l'espace (recompilés automatiquement au prochain lancement de jeu).\n▪ Si non utilisé : Conserve les caches de shaders existants.",
+                                ),
+                                l.tr("✔ 100% safe: graphics drivers recreate shaders cleanly upon game start", "✔ 100 % sans danger : les pilotes graphiques recompilent les shaders proprement au démarrage d'un jeu"),
+                                false,
+                            );
+                        })
+                        .clicked()
+                    {
+                        self.spawn_clean_shader_caches();
+                    }
+                });
+
+                // Card: Ultimate Performance Power Plan
+                cols[1].group(|ui| {
+                    ui.label(RichText::new(l.tr("• Ultimate Performance Power Plan", "• Plan d'alimentation Performances Ultimes")).strong());
+                    let is_active = self.gaming_status.as_ref().map(|s| s.ultimate_perf_active).unwrap_or(false);
+                    let (status_str, status_color) = if is_active {
+                        (l.tr("Active", "Actif"), Color32::from_rgb(80, 225, 130))
+                    } else {
+                        (l.tr("Inactive", "Inactif"), Color32::from_rgb(180, 180, 180))
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}: ", l.tr("Status", "État")));
+                        ui.label(RichText::new(status_str).color(status_color).strong());
+                    });
+                    ui.add_space(2.0);
+                    ui.label(l.tr(
+                        "Eliminates micro-latencies by disabling core parking and power throttling.",
+                        "Élimine les micro-latences en désactivant le parcage des cœurs et le bridage énergétique.",
+                    ));
+                    ui.add_space(4.0);
+
+                    if ui
+                        .add_enabled(
+                            !self.is_busy,
+                            egui::Button::new(l.tr(
+                                "⚡ Unlock & Enable Ultimate Performance",
+                                "⚡ Débloquer & Activer Performances Ultimes",
+                            )),
+                        )
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Unlock & Enable Ultimate Performance Power Plan", "Débloquer & Activer Performances Ultimes"),
+                                l.tr(
+                                    "▪ Default: Windows uses Balanced or High Performance plan with CPU frequency scaling and micro-sleep states.\n▪ If enabled: Unlocks the hidden OEM Ultimate Performance power scheme (GUID e9a42b02-d5df-448d-aa00-03f14749eb61) to eliminate CPU throttling and reduce latency.\n▪ If skipped: Retains currently active power plan.",
+                                    "▪ Par défaut : Windows utilise le mode Équilibré ou Performances Élevées avec bridage d'horloge et micro-sommeil du CPU.\n▪ Si utilisé : Débloque le plan caché constructeur Performances Ultimes (GUID e9a42b02-d5df-448d-aa00-03f14749eb61) pour éliminer le throttling et réduire la latence.\n▪ Si non utilisé : Conserve le plan d'alimentation actuellement actif.",
+                                ),
+                                l.tr("✔ Reversible in Restore tab (sets back to Balanced)", "✔ Réversible dans l'onglet Restauration (remet le mode Équilibré)"),
+                                false,
+                            );
+                        })
+                        .clicked()
+                    {
+                        self.spawn_enable_ultimate_plan();
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(2.0);
+            ui.label(RichText::new(l.tr("Low-Latency OS Gaming Switches", "Interrupteurs Gaming Basse Latence Windows")).strong());
+            ui.add_space(4.0);
+
+            // HAGS
+            let hags_on = self.gaming_status.as_ref().map(|s| s.hags_enabled).unwrap_or(false);
+            ui.horizontal(|ui| {
+                let hags_btn_text = if hags_on {
+                    RichText::new(l.tr("HAGS (GPU Scheduling) [ON]", "HAGS (Planification GPU) [ON]"))
+                        .color(Color32::from_rgb(80, 225, 130)).strong()
+                } else {
+                    RichText::new(l.tr("HAGS (GPU Scheduling) [OFF]", "HAGS (Planification GPU) [OFF]"))
+                        .color(Color32::from_rgb(180, 180, 180))
+                };
+                if ui
+                    .add_enabled(!self.is_busy, egui::Button::new(hags_btn_text))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            "HAGS (Hardware-Accelerated GPU Scheduling)",
+                            l.tr(
+                                "▪ Default: CPU coordinates and schedules GPU rendering tasks, introducing slight scheduling overhead.\n▪ If enabled: Offloads frame scheduling directly to a dedicated GPU scheduling processor, reducing frame-time latency and enabling DLSS 3 Frame Generation.\n▪ If skipped: Retains standard CPU-based GPU scheduling.",
+                                "▪ Par défaut : Le processeur CPU planifie et distribue les tâches de rendu GPU, induisant une légère latence de synchronisation.\n▪ Si utilisé : Confie l'ordonnancement directement au processeur dédié du GPU, réduisant la latence d'affichage et activant la Génération d'images DLSS 3.\n▪ Si non utilisé : Conserve la planification GPU classique par le CPU.",
+                            ),
+                            l.tr("⚠ Requires PC reboot to take effect", "⚠ Nécessite un redémarrage du PC pour prendre effet"),
+                            true,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_set_hags(!hags_on);
+                }
+
+                ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            "HAGS (Hardware-Accelerated GPU Scheduling)",
+                            l.tr(
+                                "▪ Default: CPU coordinates and schedules GPU rendering tasks, introducing slight scheduling overhead.\n▪ If enabled: Offloads frame scheduling directly to a dedicated GPU scheduling processor, reducing frame-time latency and enabling DLSS 3 Frame Generation.\n▪ If skipped: Retains standard CPU-based GPU scheduling.",
+                                "▪ Par défaut : Le processeur CPU planifie et distribue les tâches de rendu GPU, induisant une légère latence de synchronisation.\n▪ Si utilisé : Confie l'ordonnancement directement au processeur dédié du GPU, réduisant la latence d'affichage et activant la Génération d'images DLSS 3.\n▪ Si non utilisé : Conserve la planification GPU classique par le CPU.",
+                            ),
+                            l.tr("⚠ Requires PC reboot to take effect", "⚠ Nécessite un redémarrage du PC pour prendre effet"),
+                            true,
+                        );
+                    });
+
+                ui.add_space(16.0);
+
+                // VBS
+                let vbs_on = self.gaming_status.as_ref().map(|s| s.vbs_enabled).unwrap_or(false);
+                let vbs_btn_text = if vbs_on {
+                    RichText::new(l.tr("VBS / Core Isolation [ON]", "VBS / Isolation Noyau [ON]"))
+                        .color(Color32::from_rgb(80, 225, 130)).strong()
+                } else {
+                    RichText::new(l.tr("VBS / Core Isolation [OFF]", "VBS / Isolation Noyau [OFF]"))
+                        .color(Color32::from_rgb(255, 120, 120)).strong()
+                };
+                if ui
+                    .add_enabled(!self.is_busy, egui::Button::new(vbs_btn_text))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("VBS / Core Isolation (Virtualization-Based Security)", "VBS / Isolation du noyau (Virtualization-Based Security)"),
+                            l.tr(
+                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled (VBS OFF): Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped (VBS ON): Keeps Microsoft virtualization security active for maximum enterprise security.",
+                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si désactivé (VBS OFF) : Libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si activé (VBS ON) : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
+                            ),
+                            l.tr("⚠ Major FPS impact in gaming vs enterprise security trade-off. Requires reboot.", "⚠ Compromis FPS en jeu vs protection entreprise. Nécessite un redémarrage."),
+                            true,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_set_vbs(!vbs_on);
+                }
+
+                ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("VBS / Core Isolation (Virtualization-Based Security)", "VBS / Isolation du noyau (Virtualization-Based Security)"),
+                            l.tr(
+                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled (VBS OFF): Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped (VBS ON): Keeps Microsoft virtualization security active for maximum enterprise security.",
+                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si désactivé (VBS OFF) : Libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si activé (VBS ON) : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
+                            ),
+                            l.tr("⚠ Major FPS impact in gaming vs enterprise security trade-off. Requires reboot.", "⚠ Compromis FPS en jeu vs protection entreprise. Nécessite un redémarrage."),
+                            true,
+                        );
+                    });
+
+                ui.add_space(16.0);
+
+                // Game Mode
+                let gm_on = self.gaming_status.as_ref().map(|s| s.game_mode_enabled).unwrap_or(true);
+                let gm_btn_text = if gm_on {
+                    RichText::new(l.tr("Windows Game Mode [ON]", "Mode Jeu Windows [ON]"))
+                        .color(Color32::from_rgb(80, 225, 130)).strong()
+                } else {
+                    RichText::new(l.tr("Windows Game Mode [OFF]", "Mode Jeu Windows [OFF]"))
+                        .color(Color32::from_rgb(180, 180, 180))
+                };
+                if ui
+                    .add_enabled(!self.is_busy, egui::Button::new(gm_btn_text))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Windows Game Mode", "Mode Jeu Windows"),
+                            l.tr(
+                                "▪ Default: Windows Game Mode is enabled by default in Windows 10/11.\n▪ If enabled: Prioritizes CPU and GPU resources for foreground games and prevents background updates or driver restarts while gaming.\n▪ If skipped: Treats games with normal background task priority.",
+                                "▪ Par défaut : Le Mode Jeu Windows est activé par défaut dans Windows 10/11.\n▪ Si utilisé : Priorise l'allocation des cœurs CPU et du GPU pour les jeux au premier plan et suspend les tâches/mises à jour en arrière-plan pendant la partie.\n▪ Si non utilisé : Traite les jeux avec la priorité système standard.",
+                            ),
+                            l.tr("✔ Recommended ON for gaming stability", "✔ Recommandé ACTIF pour la stabilité en jeu"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_set_game_mode(!gm_on);
+                }
+
+                ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Windows Game Mode", "Mode Jeu Windows"),
+                            l.tr(
+                                "▪ Default: Windows Game Mode is enabled by default in Windows 10/11.\n▪ If enabled: Prioritizes CPU and GPU resources for foreground games and prevents background updates or driver restarts while gaming.\n▪ If skipped: Treats games with normal background task priority.",
+                                "▪ Par défaut : Le Mode Jeu Windows est activé par défaut dans Windows 10/11.\n▪ Si utilisé : Priorise l'allocation des cœurs CPU et du GPU pour les jeux au premier plan et suspend les tâches/mises à jour en arrière-plan pendant la partie.\n▪ Si non utilisé : Traite les jeux avec la priorité système standard.",
+                            ),
+                            l.tr("✔ Recommended ON for gaming stability", "✔ Recommandé ACTIF pour la stabilité en jeu"),
+                            false,
+                        );
+                    });
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // Section 2: Battery & SMART Health
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(l.tr(
+                        "🔋 Battery Health & Storage S.M.A.R.T.",
+                        "🔋 Santé Batterie & S.M.A.R.T. SSD/NVMe",
+                    ))
+                    .color(Color32::from_rgb(110, 230, 160)),
+                );
+            });
+            ui.add_space(2.0);
+            ui.label(l.tr(
+                "Inspect battery wear level, design vs actual capacity, NVMe/SSD wear percentage, temperatures, and hardware read/write error logs.",
+                "Inspectez le niveau d'usure de la batterie, la capacité d'usine vs actuelle, l'usure des NVMe/SSD, les températures et les compteurs d'erreurs matérielles.",
+            ));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr(
+                            "🔍 Scan Battery & S.M.A.R.T. Disks",
+                            "🔍 Analyser Batterie & S.M.A.R.T. Disques",
+                        )),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Scan Battery & S.M.A.R.T. Disks", "Analyser Batterie & S.M.A.R.T. Disques"),
+                            l.tr(
+                                "▪ Default: Hardware wear and battery telemetry are queried on demand.\n▪ If enabled: Reads battery capacity (design vs full charge) and disk health, wear %, temperature, and I/O error counters.\n▪ If skipped: Hardware telemetry is not queried.",
+                                "▪ Par défaut : L'usure matérielle et la télémétrie de batterie sont interrogées sur demande.\n▪ Si utilisé : Interroge la capacité de batterie (d'usine vs pleine charge) et la santé des disques, usure %, température et erreurs E/S.\n▪ Si non utilisé : La télémétrie matérielle n'est pas interrogée.",
+                            ),
+                            l.tr("✔ 100% read-only diagnostic", "✔ Diagnostic 100 % en lecture seule"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_scan_battery_smart();
+                }
+
+                if ui
+                    .add_enabled(
+                        !self.is_busy,
+                        egui::Button::new(l.tr(
+                            "📄 Generate Battery HTML Report (Desktop)",
+                            "📄 Générer le rapport HTML Batterie (Bureau)",
+                        )),
+                    )
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Generate Windows Battery Report", "Générer le rapport de batterie Windows"),
+                            l.tr(
+                                "▪ Default: No battery report file is generated.\n▪ If enabled: Executes powercfg /batteryreport to generate a complete official HTML diagnostic on your Desktop and automatically opens it in your default browser.\n▪ If skipped: No battery report is saved.",
+                                "▪ Par défaut : Aucun rapport de batterie n'est généré sur le disque.\n▪ Si utilisé : Exécute powercfg /batteryreport pour produire un diagnostic HTML officiel complet sur votre Bureau et l'ouvre dans votre navigateur.\n▪ Si non utilisé : Aucun rapport de batterie n'est créé.",
+                            ),
+                            l.tr("✔ Official Microsoft diagnostic tool", "✔ Outil officiel de diagnostic Microsoft"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    self.spawn_generate_battery_report();
+                }
+            });
+
+            ui.add_space(6.0);
+
+            if let Some(info) = &self.battery_smart {
+                // Battery details
+                ui.group(|ui| {
+                    ui.label(RichText::new(l.tr("• Battery Health Status", "• État de Santé de la Batterie")).strong());
+                    if info.has_battery {
+                        ui.label(format!("{}: {}", l.tr("Model / ID", "Modèle / Identifiant"), info.battery_name));
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{}: {} mWh  |  {}: {} mWh  |  ",
+                                l.tr("Design Capacity", "Capacité d'usine"),
+                                info.design_capacity_mwh,
+                                l.tr("Full Charge", "Pleine charge"),
+                                info.full_charge_capacity_mwh
+                            ));
+
+                            let h_color = if info.battery_health_pct >= 80.0 {
+                                Color32::from_rgb(80, 225, 120)
+                            } else if info.battery_health_pct >= 50.0 {
+                                Color32::from_rgb(255, 200, 70)
+                            } else {
+                                Color32::from_rgb(255, 100, 100)
+                            };
+                            ui.label(format!("{}: ", l.tr("Real Health", "Santé réelle")));
+                            ui.label(RichText::new(format!("{:.1}%", info.battery_health_pct)).color(h_color).strong());
+                        });
+                    } else {
+                        ui.label(RichText::new(l.tr(
+                            "Aucune batterie détectée (PC fixe)",
+                            "Aucune batterie détectée (PC fixe)",
+                        )).color(Color32::LIGHT_GRAY));
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                // SMART Disks details
+                ui.group(|ui| {
+                    ui.label(RichText::new(l.tr("• Physical Disks S.M.A.R.T. Counters", "• Compteurs S.M.A.R.T. des Disques Physiques")).strong());
+                    if info.smart_disks.is_empty() {
+                        ui.label(RichText::new(l.tr(
+                            "No physical disks returned by storage telemetry.",
+                            "Aucun disque physique détecté via la télémétrie de stockage.",
+                        )).weak());
+                    } else {
+                        egui::Grid::new("smart_disks_grid")
+                            .striped(true)
+                            .min_col_width(70.0)
+                            .show(ui, |ui| {
+                                ui.strong(l.tr("Model", "Modèle"));
+                                ui.strong(l.tr("Media Type", "Type"));
+                                ui.strong(l.tr("Health", "Santé"));
+                                ui.strong(l.tr("Temperature", "Température"));
+                                ui.strong(l.tr("Wear %", "Usure %"));
+                                ui.strong(l.tr("Read / Write Errors", "Erreurs Lecture / Écriture"));
+                                ui.end_row();
+
+                                for disk in &info.smart_disks {
+                                    ui.label(RichText::new(&disk.friendly_name).strong());
+                                    ui.label(&disk.media_type);
+
+                                    let is_healthy = disk.health_status.to_lowercase().contains("healthy")
+                                        || disk.health_status.to_lowercase().contains("sain");
+                                    let h_color = if is_healthy {
+                                        Color32::from_rgb(80, 225, 120)
+                                    } else {
+                                        Color32::from_rgb(255, 100, 100)
+                                    };
+                                    ui.label(RichText::new(&disk.health_status).color(h_color).strong());
+
+                                    let temp_str = match disk.temperature_c {
+                                        Some(t) => format!("{t} °C"),
+                                        None => "N/A".to_string(),
+                                    };
+                                    ui.label(temp_str);
+
+                                    let wear_str = match disk.wear_pct {
+                                        Some(w) => format!("{w} %"),
+                                        None => "N/A".to_string(),
+                                    };
+                                    ui.label(wear_str);
+
+                                    ui.label(format!("{}/{}", disk.read_errors, disk.write_errors));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+            } else {
+                ui.label(RichText::new(l.tr(
+                    "Click 'Scan Battery & S.M.A.R.T. Disks' to retrieve hardware health telemetry.",
+                    "Cliquez sur 'Analyser Batterie & S.M.A.R.T. Disques' pour récupérer la télémétrie de santé matérielle.",
+                )).weak());
+            }
+        });
+    }
+
     fn render_restore_tab(&mut self, ui: &mut egui::Ui) {
         let l = self.lang;
         ui.heading(l.tr(
@@ -2758,6 +4196,8 @@ impl eframe::App for WinCareApp {
                     ActiveTab::BoostPc => self.render_boost_pc_tab(ui),
                     ActiveTab::BoostNet => self.render_boost_net_tab(ui),
                     ActiveTab::Debloat => self.render_debloat_tab(ui),
+                    ActiveTab::Apps => self.render_apps_tab(ui),
+                    ActiveTab::GamingHardware => self.render_gaming_hardware_tab(ui),
                     ActiveTab::Restore => self.render_restore_tab(ui),
                 });
         });
@@ -2784,6 +4224,12 @@ mod tests {
 
         assert_eq!(ActiveTab::Debloat.label(Lang::En), "🧹 Debloat & Tweaks");
         assert_eq!(ActiveTab::Debloat.label(Lang::Fr), "🧹 Debloat & Tweaks");
+
+        assert_eq!(ActiveTab::Apps.label(Lang::En), "📦 Apps & Bloatware");
+        assert_eq!(ActiveTab::Apps.label(Lang::Fr), "📦 Logiciels & Bloatwares");
+
+        assert_eq!(ActiveTab::GamingHardware.label(Lang::En), "🎮 Gaming & Hardware");
+        assert_eq!(ActiveTab::GamingHardware.label(Lang::Fr), "🎮 Gaming & Matériel");
 
         assert_eq!(ActiveTab::Restore.label(Lang::En), "↩ Restore (.RESTORE)");
         assert_eq!(ActiveTab::Restore.label(Lang::Fr), "↩ Restauration (.RESTORE)");

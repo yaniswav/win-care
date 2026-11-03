@@ -44,6 +44,12 @@ pub enum WorkerEvent {
     TempAnalysisReady(Vec<TempSubfolderInfo>),
     DebloatListUpdated(Vec<DebloatTweakStatus>),
     UpdateCheckReady(Option<crate::updater::UpdateInfo>),
+    WingetListReady(Vec<WingetUpgradeItem>),
+    AppxListReady(Vec<AppxBloatItem>),
+    GamingStatusReady(GamingStatus),
+    BatterySmartReady(BatteryAndSmartInfo),
+    WeeklyTaskStatusReady(bool),
+    ProfileImported(WinCareProfile),
     TaskFinished {
         title: String,
         need_reboot: bool,
@@ -88,7 +94,7 @@ pub struct DebloatTweakStatus {
     pub is_applied: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RepairTask {
     Dism,
     Sfc,
@@ -216,7 +222,8 @@ pub struct PcDiagnosis {
     pub cache_total_mb: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PcCleanOptions {
     pub clean_user_temp: bool,
     pub clean_sys_temp: bool,
@@ -241,7 +248,8 @@ impl Default for PcCleanOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PcOptimOptions {
     pub high_perf_power: bool,
     pub ultimate_perf_power: bool,
@@ -313,7 +321,8 @@ pub struct NetDiagnosis {
     pub speedtest_ping_ms: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetOptimOptions {
     pub apply_best_dns: bool,
     pub apply_optimal_mtu: bool,
@@ -378,4 +387,64 @@ pub struct MetricDiff {
     pub after: String,
     pub delta: String,
     pub improved: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WingetUpgradeItem {
+    pub name: String,
+    pub id: String,
+    pub current_version: String,
+    pub available_version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GamingStatus {
+    pub ultimate_perf_active: bool,
+    pub ultimate_perf_guid: Option<String>,
+    pub hags_enabled: bool,
+    pub vbs_enabled: bool,
+    pub game_mode_enabled: bool,
+    pub shader_cache_size_mb: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppxBloatItem {
+    pub id: String,
+    pub display_name: String,
+    pub package_pattern: String,
+    pub description_en: String,
+    pub description_fr: String,
+    pub installed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SmartDiskHealth {
+    pub friendly_name: String,
+    pub media_type: String,
+    pub health_status: String,
+    pub temperature_c: Option<u32>,
+    pub wear_pct: Option<u32>,
+    pub read_errors: u64,
+    pub write_errors: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BatteryAndSmartInfo {
+    pub has_battery: bool,
+    pub battery_name: String,
+    pub design_capacity_mwh: u64,
+    pub full_charge_capacity_mwh: u64,
+    pub battery_health_pct: f64,
+    pub smart_disks: Vec<SmartDiskHealth>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WinCareProfile {
+    pub version: String,
+    pub repair_tasks: Vec<RepairTask>,
+    pub pc_clean: PcCleanOptions,
+    pub pc_optim: PcOptimOptions,
+    pub net_optim: NetOptimOptions,
+    pub debloat_applied_ids: Vec<String>,
 }
