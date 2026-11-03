@@ -159,8 +159,8 @@ fn main() {
     }
 
     let title = lang.tr(
-        "WinCare v0.3 — Windows Maintenance, Optimization & Debloat",
-        "WinCare v0.3 — Réparation, Optimisation & Debloat Windows",
+        concat!("WinCare v", env!("CARGO_PKG_VERSION"), " — Windows Maintenance, Optimization & Debloat"),
+        concat!("WinCare v", env!("CARGO_PKG_VERSION"), " — Réparation, Optimisation & Debloat Windows"),
     );
 
     let native_options = eframe::NativeOptions {
@@ -188,8 +188,8 @@ fn main() {
 fn run_cli_mode(args: &CliArgs, admin: bool, lang: i18n::Lang) {
     let logger = Logger::new(None, true);
     logger.section(lang.tr(
-        "WINCARE v0.3 - COMMAND LINE MODE",
-        "WINCARE v0.3 - MODE LIGNE DE COMMANDE",
+        concat!("WINCARE v", env!("CARGO_PKG_VERSION"), " - COMMAND LINE MODE"),
+        concat!("WINCARE v", env!("CARGO_PKG_VERSION"), " - MODE LIGNE DE COMMANDE"),
     ));
     logger.info(format!(
         "{} : {} | {} : {}",

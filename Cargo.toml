@@ -1,6 +1,6 @@
 [package]
 name = "win-care"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 repository = "https://github.com/yaniswav/win-care"
 description = "Outil tout-en-un léger de réparation et d'optimisation Windows (Repair-Windows, Boost-PC, Boost-Internet)"

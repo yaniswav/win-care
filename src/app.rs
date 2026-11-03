@@ -61,16 +61,67 @@ fn configure_ui_and_fonts(ctx: &egui::Context) {
     });
 }
 
+/// Analyse une ligne de texte d'infobulle pour détecter un préfixe structuré en 3 volets.
+pub(crate) fn parse_tooltip_line(line: &str) -> Option<(&'static str, Color32, &str)> {
+    if let Some(r) = line.strip_prefix("▪ Default:") {
+        Some(("▪ Default:", Color32::from_rgb(150, 200, 255), r))
+    } else if let Some(r) = line.strip_prefix("▪ Par défaut :") {
+        Some(("▪ Par défaut :", Color32::from_rgb(150, 200, 255), r))
+    } else if let Some(r) = line.strip_prefix("▪ Par défaut:") {
+        Some(("▪ Par défaut:", Color32::from_rgb(150, 200, 255), r))
+    } else if let Some(r) = line.strip_prefix("▪ If enabled:") {
+        Some(("▪ If enabled:", Color32::from_rgb(100, 235, 160), r))
+    } else if let Some(r) = line.strip_prefix("▪ Si utilisé :") {
+        Some(("▪ Si utilisé :", Color32::from_rgb(100, 235, 160), r))
+    } else if let Some(r) = line.strip_prefix("▪ Si utilisé:") {
+        Some(("▪ Si utilisé:", Color32::from_rgb(100, 235, 160), r))
+    } else if let Some(r) = line.strip_prefix("▪ If skipped:") {
+        Some(("▪ If skipped:", Color32::from_rgb(235, 190, 110), r))
+    } else if let Some(r) = line.strip_prefix("▪ Si non utilisé :") {
+        Some(("▪ Si non utilisé :", Color32::from_rgb(235, 190, 110), r))
+    } else if let Some(r) = line.strip_prefix("▪ Si non utilisé:") {
+        Some(("▪ Si non utilisé:", Color32::from_rgb(235, 190, 110), r))
+    } else {
+        None
+    }
+}
+
 /// Affiche une infobulle riche et structurée (Titre + Explication + Niveau de sécurité).
 fn show_rich_tooltip(ui: &mut egui::Ui, title: &str, details: &str, safety: &str, is_warning: bool) {
-    ui.set_max_width(420.0);
+    ui.set_max_width(480.0);
     ui.label(
         RichText::new(title)
             .strong()
             .color(Color32::from_rgb(100, 210, 255)),
     );
     ui.separator();
-    ui.label(details);
+    for line in details.lines() {
+        let (prefix, color, rest) = match parse_tooltip_line(line) {
+            Some(res) => res,
+            None => {
+                ui.label(line);
+                ui.add_space(2.0);
+                continue;
+            }
+        };
+
+        let rest_formatted = if !rest.is_empty() && !rest.starts_with(' ') {
+            format!(" {}", rest)
+        } else {
+            rest.to_string()
+        };
+
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = 480.0;
+        RichText::new(prefix)
+            .strong()
+            .color(color)
+            .append_to(&mut job, ui.style(), egui::FontSelection::Default, egui::Align::LEFT);
+        RichText::new(rest_formatted)
+            .append_to(&mut job, ui.style(), egui::FontSelection::Default, egui::Align::LEFT);
+        ui.label(job);
+        ui.add_space(2.0);
+    }
     ui.add_space(4.0);
     let safety_color = if is_warning {
         Color32::from_rgb(255, 200, 80)
@@ -168,14 +219,15 @@ impl WinCareApp {
         let init_logger = Logger::new(Some(tx.clone()), false);
         let log_file_path = init_logger.log_path.clone();
 
-        init_logger.info(match lang {
+        let ready_msg = match lang {
             Lang::En => {
-                "WinCare v0.2.1 ready. Hover over any option or [?] badge to view its detailed tooltip."
+                format!("WinCare v{} ready. Hover over any option or [?] badge to view its detailed tooltip.", env!("CARGO_PKG_VERSION"))
             }
             Lang::Fr => {
-                "WinCare v0.2.1 prêt. Survolez n'importe quelle option ou badge [?] pour afficher son infobulle détaillée."
+                format!("WinCare v{} prêt. Survolez n'importe quelle option ou badge [?] pour afficher son infobulle détaillée.", env!("CARGO_PKG_VERSION"))
             }
-        });
+        };
+        init_logger.info(&ready_msg);
         if !is_admin {
             init_logger.warn(match lang {
                 Lang::En => "Running without Administrator privileges: some repairs require UAC elevation.",
@@ -657,7 +709,7 @@ impl WinCareApp {
         let l = self.lang;
         ui.horizontal(|ui| {
             ui.heading(
-                RichText::new("⚡ WinCare v0.2.1")
+                RichText::new(format!("⚡ WinCare v{}", env!("CARGO_PKG_VERSION")))
                     .strong()
                     .color(Color32::from_rgb(90, 200, 250)),
             );
@@ -959,8 +1011,8 @@ impl WinCareApp {
                     l.tr("Include Ookla Speedtest", "Inclure Speedtest Ookla"),
                     l.tr("Ookla Speedtest Bandwidth Test", "Test de débit Ookla Speedtest"),
                     l.tr(
-                        "If checked, runs speedtest.exe to measure real Download and Upload bandwidth.",
-                        "Si coché, exécute speedtest.exe pour mesurer votre vitesse réelle de téléchargement (Download) et d'envoi (Upload).",
+                        "▪ Default: Bandwidth speed testing is skipped during diagnosis to save time.\n▪ If enabled: Runs speedtest.exe to measure real Download and Upload bandwidth.\n▪ If skipped: Only ping, routing, DNS benchmark, and MTU will be evaluated.",
+                        "▪ Par défaut : Le test de bande passante est ignoré lors du diagnostic pour un résultat rapide.\n▪ Si utilisé : Exécute speedtest.exe pour mesurer votre vitesse réelle de téléchargement (Download) et d'envoi (Upload).\n▪ Si non utilisé : Seuls le ping, la route, le benchmark DNS et le MTU sont évalués.",
                     ),
                     l.tr("ℹ Adds ~25 seconds to diagnosis", "ℹ Ajoute environ 25 secondes au diagnostic"),
                     false,
@@ -1392,8 +1444,8 @@ impl WinCareApp {
                     l.tr("Clean user %TEMP%", "Vider %TEMP% utilisateur"),
                     l.tr("User %TEMP% Folder Cleanup", "Nettoyage du dossier %TEMP% utilisateur"),
                     l.tr(
-                        "Deletes temporary files from your user session (C:\\Users\\<You>\\AppData\\Local\\Temp) left behind by installers and apps.",
-                        "Supprime les fichiers et dossiers temporaires de votre session (C:\\Users\\<Vous>\\AppData\\Local\\Temp). C'est ici que s'accumulent les résidus d'installateurs, de navigateurs et d'outils.",
+                        "▪ Default: Windows stores temporary caches and application installer files in %LOCALAPPDATA%\\Temp indefinitely.\n▪ If enabled: Deletes unneeded user temporary files older than 24h, freeing disk space safely.\n▪ If skipped: Keeps temporary files and installer remnants on your system drive.",
+                        "▪ Par défaut : Windows conserve indéfiniment les caches et résidus d'installation dans %LOCALAPPDATA%\\Temp.\n▪ Si utilisé : Supprime les fichiers temporaires de session utilisateur de plus de 24h, libérant de l'espace disque.\n▪ Si non utilisé : Conserve l'intégralité des résidus et fichiers temporaires sur votre disque système.",
                     ),
                     l.tr("✔ 100% safe: files in use by active applications are automatically skipped", "✔ 100 % sans danger : les fichiers utilisés par vos applications ouvertes sont automatiquement ignorés"),
                     false,
@@ -1405,8 +1457,8 @@ impl WinCareApp {
                     l.tr("Clean C:\\Windows\\Temp system", "Vider C:\\Windows\\Temp système"),
                     l.tr("System C:\\Windows\\Temp Folder Cleanup", "Nettoyage du dossier C:\\Windows\\Temp"),
                     l.tr(
-                        "Deletes temporary files created by Windows system services and driver installers.",
-                        "Supprime les fichiers temporaires créés par les services système Windows et les mises à jour de pilotes.",
+                        "▪ Default: System services, drivers, and background installers leave temporary logs in C:\\Windows\\Temp.\n▪ If enabled: Cleans orphan system temporary files not locked by active Windows processes.\n▪ If skipped: Leaves system temporary files and driver logs accumulating in C:\\Windows\\Temp.",
+                        "▪ Par défaut : Les services système, pilotes et installeurs stockent des résidus dans C:\\Windows\\Temp.\n▪ Si utilisé : Nettoie les fichiers temporaires orphelins non verrouillés par les processus Windows actifs.\n▪ Si non utilisé : Laisse les résidus système et journaux de pilotes s'accumuler dans C:\\Windows\\Temp.",
                     ),
                     l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
@@ -1418,8 +1470,8 @@ impl WinCareApp {
                     l.tr("Clean Windows Update cache (SoftwareDistribution\\Download)", "Vider le cache Windows Update (SoftwareDistribution\\Download)"),
                     l.tr("Windows Update Download Cache Purge", "Purge du cache de téléchargement Windows Update"),
                     l.tr(
-                        "Temporarily stops Windows Update service, deletes downloaded update packages in C:\\Windows\\SoftwareDistribution\\Download, then restarts the service.",
-                        "Arrête momentanément le service Windows Update, supprime les anciens paquets de mises à jour déjà installés dans C:\\Windows\\SoftwareDistribution\\Download, puis redémarre le service.",
+                        "▪ Default: Downloaded Windows Update installation packages remain in SoftwareDistribution\\Download.\n▪ If enabled: Stops the update service, deletes cached packages, and restarts Windows Update smoothly.\n▪ If skipped: Keeps downloaded update files, which may consume several gigabytes of disk space.",
+                        "▪ Par défaut : Les paquets d'installation téléchargés par Windows Update restent stockés sur le disque.\n▪ Si utilisé : Interrompt le service, purge les paquets téléchargés obsolètes, puis redémarre Windows Update.\n▪ Si non utilisé : Conserve les paquets de mise à jour téléchargés, occupant souvent plusieurs gigaoctets.",
                     ),
                     l.tr("✔ 100% safe: often frees several GB and fixes stuck updates", "✔ 100 % sans danger : libère souvent plusieurs Go et répare les mises à jour bloquées"),
                     false,
@@ -1431,8 +1483,8 @@ impl WinCareApp {
                     l.tr("Delete error reports (WER) and CrashDumps", "Supprimer les rapports d'erreur (WER) et CrashDumps"),
                     l.tr("Crash Reports Cleanup (WER & CrashDumps)", "Suppression des rapports de plantage (WER & CrashDumps)"),
                     l.tr(
-                        "Clears Windows Error Reporting queues and memory .dmp files in %LOCALAPPDATA%\\CrashDumps from application or game crashes.",
-                        "Vide les dossiers Windows Error Reporting (ReportQueue / ReportArchive) ainsi que les fichiers mémoire .dmp dans %LOCALAPPDATA%\\CrashDumps créés lors du crash d'un jeu ou logiciel.",
+                        "▪ Default: Windows Error Reporting queues reports and crash dumps in memory logs indefinitely.\n▪ If enabled: Deletes crash memory dump files (.dmp) and error reporting archives to reclaim disk space.\n▪ If skipped: Retains past crash dump files and error queues on the system partition.",
+                        "▪ Par défaut : Windows Error Reporting archive les journaux d'erreurs et fichiers de vidage mémoire.\n▪ Si utilisé : Supprime les fichiers de plantage (.dmp) et les archives de rapports d'erreurs accumulés.\n▪ Si non utilisé : Conserve l'ensemble des rapports d'erreurs et fichiers de crash sur la partition système.",
                     ),
                     l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
@@ -1444,8 +1496,8 @@ impl WinCareApp {
                     l.tr("Empty Recycle Bin on all drives", "Vider la corbeille de tous les disques"),
                     l.tr("Windows Recycle Bin Emptying", "Vidage de la Corbeille Windows"),
                     l.tr(
-                        "Permanently empties the Recycle Bin across all internal and connected external drives.",
-                        "Vide définitivement la Corbeille sur tous vos disques internes et externes connectés.",
+                        "▪ Default: Deleted files remain stored in the Recycle Bin on all local and external drives.\n▪ If enabled: Empties the Recycle Bin permanently across all detected drives in one operation.\n▪ If skipped: Leaves existing files in the Recycle Bin until manually emptied.",
+                        "▪ Par défaut : Les fichiers supprimés restent stockés dans la Corbeille de chaque lecteur.\n▪ Si utilisé : Purge définitivement le contenu de la Corbeille sur l'ensemble des disques connectés.\n▪ Si non utilisé : Conserve tous les éléments actuellement présents dans la Corbeille.",
                     ),
                     l.tr("⚠ Warning: uncheck this if you store files in your Recycle Bin!", "⚠ Attention : décochez cette case si vous conservez des fichiers dans votre Corbeille !"),
                     true,
@@ -1457,8 +1509,8 @@ impl WinCareApp {
                     l.tr("Deep WinSxS cleanup (DISM /StartComponentCleanup /ResetBase — slow)", "Nettoyer le WinSxS (DISM /StartComponentCleanup /ResetBase — lent)"),
                     l.tr("WinSxS Component Store Deep Cleanup", "Nettoyage approfondi du magasin de composants WinSxS"),
                     l.tr(
-                        "Runs DISM /StartComponentCleanup /ResetBase to remove superseded Windows component versions replaced by recent updates.",
-                        "Exécute DISM /StartComponentCleanup /ResetBase pour supprimer les anciennes versions obsolètes des composants système Windows remplacées par les mises à jour récentes.",
+                        "▪ Default: WinSxS keeps historical backup copies of superseded system components after every update.\n▪ If enabled: Runs DISM /StartComponentCleanup /ResetBase to remove obsolete components (slow, frees 2-8 GB).\n▪ If skipped: Retains old component versions, allowing uninstallation of previous updates.",
+                        "▪ Par défaut : WinSxS conserve les copies de sauvegarde de tous les composants remplacés par les mises à jour.\n▪ Si utilisé : Exécute DISM /StartComponentCleanup /ResetBase pour purger les composants obsolètes (lent, gain 2-8 Go).\n▪ Si non utilisé : Conserve les versions antérieures de composants, permettant de désinstaller d'anciennes mises à jour.",
                     ),
                     l.tr("ℹ Unchecked by default because it takes 5 to 15 minutes (can free 2 to 8 GB)", "ℹ Décoché par défaut car l'opération dure 5 à 15 minutes (permet de gagner 2 à 8 Go)"),
                     true,
@@ -1470,8 +1522,8 @@ impl WinCareApp {
                     l.tr("Run Windows Disk Cleanup (silent cleanmgr)", "Lancer le nettoyage de disque Windows (cleanmgr silencieux)"),
                     l.tr("Official Microsoft Disk Cleanup (cleanmgr.exe)", "Nettoyage de disque officiel Microsoft (cleanmgr.exe)"),
                     l.tr(
-                        "Enables 20 safe cleanup flags in Windows Cleanmgr (thumbnails, DirectX shader cache, old setup logs) and runs it automatically.",
-                        "Active les 20 règles de nettoyage sécurisées de l'utilitaire Windows Cleanmgr (miniatures, caches DirectX/Internet, anciens journaux de setup) et l'exécute automatiquement.",
+                        "▪ Default: Standard Windows Disk Cleanup utility requires manual wizard selection and interaction.\n▪ If enabled: Automatically activates 20 Microsoft safe cleanup flags and executes cleanmgr silently.\n▪ If skipped: Does not invoke Windows Disk Cleanup utility.",
+                        "▪ Par défaut : L'utilitaire de nettoyage de disque Windows nécessite une sélection manuelle par l'utilisateur.\n▪ Si utilisé : Configure automatiquement 20 règles de nettoyage sécurisées et exécute cleanmgr en arrière-plan.\n▪ Si non utilisé : N'exécute pas l'outil de nettoyage de disque Windows officiel.",
                     ),
                     l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
@@ -1493,8 +1545,8 @@ impl WinCareApp {
                     l.tr("Power Plan: High Performance (SCHEME_MIN)", "Plan d'alimentation : Performances élevées (SCHEME_MIN)"),
                     l.tr("High Performance Power Profile", "Profil d'alimentation « Performances élevées »"),
                     l.tr(
-                        "Sets Windows power plan to High Performance (powercfg /setactive SCHEME_MIN) to prevent CPU downclocking during idle transitions.",
-                        "Configure Windows sur le mode d'alimentation Performances élevées (powercfg /setactive SCHEME_MIN) pour éviter que le processeur ne bride sa fréquence au repos.",
+                        "▪ Default: Windows uses the Balanced power plan, dynamically throttling CPU clocks to save energy.\n▪ If enabled: Activates High Performance plan (SCHEME_MIN), keeping CPU ready with zero downclock lag.\n▪ If skipped: Retains current power plan without modifying CPU frequency management.",
+                        "▪ Par défaut : Windows utilise le mode Équilibré, réduisant dynamiquement la fréquence CPU pour économiser l'énergie.\n▪ Si utilisé : Active le plan Performances élevées (SCHEME_MIN) pour éliminer les micro-latences de réveil processeur.\n▪ Si non utilisé : Conserve votre mode d'alimentation actuel sans modifier la gestion du processeur.",
                     ),
                     l.tr("✔ Recommended on desktop or plugged-in laptop (reversible in Restore tab)", "✔ Recommandé sur PC fixe ou PC portable branché (annulable dans Restauration)"),
                     false,
@@ -1506,8 +1558,8 @@ impl WinCareApp {
                     l.tr("Enable 'Ultimate Performance' plan (created if missing)", "Activer le plan 'Ultimate Performance' (créé si absent)"),
                     l.tr("Hidden 'Ultimate Performance' Profile", "Profil caché « Performances optimales » (Ultimate Performance)"),
                     l.tr(
-                        "Unlocks and activates workstation power plan (GUID e9a42b02...), eliminating CPU core micro-parking entirely.",
-                        "Débloque et active le plan d'alimentation réservé aux stations de travail (GUID e9a42b02...), qui désactive complètement le micro-parking des cœurs CPU.",
+                        "▪ Default: Ultimate Performance mode is hidden on consumer editions of Windows 10 and 11.\n▪ If enabled: Unlocks and activates the Workstation Ultimate Performance profile with zero core micro-parking.\n▪ If skipped: Leaves current power plan active without generating the Ultimate Performance scheme.",
+                        "▪ Par défaut : Le plan Performances optimales est masqué sur les éditions grand public de Windows.\n▪ Si utilisé : Déverrouille et applique le plan station de travail avec suppression totale du micro-parking des cœurs.\n▪ Si non utilisé : Ne crée ni n'active ce plan d'alimentation spécifique.",
                     ),
                     l.tr("ℹ Useful for gaming and audio workstations (slightly higher idle power)", "ℹ Utile sur tour gaming/MAO (consomme un peu plus d'énergie au repos)"),
                     true,
@@ -1519,8 +1571,8 @@ impl WinCareApp {
                     l.tr("Reduce visual effects (VisualFXSetting = 2 'Best Performance')", "Réduire les effets visuels (VisualFXSetting = 2 'Meilleures performances')"),
                     l.tr("Visual Effects in 'Best Performance' Mode", "Effets visuels en mode « Meilleures performances »"),
                     l.tr(
-                        "Sets VisualFXSetting = 2 in Explorer to disable slow window animations and drop shadows.",
-                        "Configure VisualFXSetting = 2 dans l'Explorateur pour désactiver les animations lentes et ombres portées des fenêtres.",
+                        "▪ Default: Windows renders all UI animations, sliding menus, window transitions, and drop shadows.\n▪ If enabled: Sets VisualFXSetting to Best Performance (2), disabling heavy animations for immediate UI response.\n▪ If skipped: Keeps current Windows visual effects and animations enabled.",
+                        "▪ Par défaut : Windows active toutes les animations, transitions de fenêtres et ombres portées du bureau.\n▪ Si utilisé : Règle VisualFXSetting sur Meilleures performances (2), désactivant les effets lourds pour une réactivité maximale.\n▪ Si non utilisé : Conserve les animations graphiques et effets visuels actuels de Windows.",
                     ),
                     l.tr("✔ Makes UI snappier (reversible in 1 click in Restore tab)", "✔ Rend l'interface plus réactive (annulable en 1 clic dans Restauration)"),
                     false,
@@ -1532,8 +1584,8 @@ impl WinCareApp {
                     l.tr("Enable Storage Sense (auto cleanup 30d)", "Activer Storage Sense (nettoyage automatique périodique 30j)"),
                     l.tr("Windows Storage Sense Auto Cleanup", "Assistant Stockage automatique de Windows (Storage Sense)"),
                     l.tr(
-                        "Configures Windows to automatically delete unused temporary files and recycle bin items older than 30 days.",
-                        "Configure Windows pour purger automatiquement les fichiers temporaires inutilisés et les éléments de la corbeille datant de plus de 30 jours.",
+                        "▪ Default: Storage Sense auto-cleanup is often disabled or set to run only during critically low disk space.\n▪ If enabled: Configures Storage Sense to automatically purge old temporary files and Recycle Bin items every 30 days.\n▪ If skipped: Leaves Storage Sense in its current configuration without scheduling automated cleanup.",
+                        "▪ Par défaut : L'Assistant Stockage est souvent désactivé ou ne se déclenche qu'en cas de saturation critique du disque.\n▪ Si utilisé : Active et configure Storage Sense pour purger automatiquement les fichiers temporaires tous les 30 jours.\n▪ Si non utilisé : Ne modifie pas la configuration actuelle de l'Assistant Stockage Windows.",
                     ),
                     l.tr("✔ 100% safe and keeps your PC clean over time", "✔ 100 % sans danger et maintient le PC propre dans la durée"),
                     false,
@@ -1545,8 +1597,8 @@ impl WinCareApp {
                     l.tr("Disable Xbox Game Bar overlay & GameDVR", "Désactiver l'overlay Xbox Game Bar & GameDVR"),
                     l.tr("Disable Xbox Game Bar & Background GameDVR Capture", "Désactivation de Xbox Game Bar & Capture GameDVR en arrière-plan"),
                     l.tr(
-                        "Disables background video recording GameDVR and Xbox Game Bar overlay (without uninstalling Xbox app).",
-                        "Désactive l'enregistrement vidéo continu GameDVR et l'overlay automatique Xbox Game Bar (sans désinstaller l'application Xbox).",
+                        "▪ Default: Windows enables background GameDVR capture and the Xbox Game Bar overlay during games.\n▪ If enabled: Disables GameDVR recording and Game Bar popups, preventing micro-stutters and input lag in games.\n▪ If skipped: Xbox Game Bar overlay and continuous background capture stay active.",
+                        "▪ Par défaut : Windows active la capture GameDVR continue en arrière-plan et l'overlay Xbox Game Bar en jeu.\n▪ Si utilisé : Désactive l'enregistrement GameDVR et l'overlay Game Bar pour éliminer les micro-saccades en jeu.\n▪ Si non utilisé : Conserve l'overlay Xbox Game Bar et la capture automatique en arrière-plan.",
                     ),
                     l.tr("✔ Prevents FPS drops and micro-stutters during gaming", "✔ Évite les pertes de FPS et micro-saccades en jeu"),
                     false,
@@ -1558,8 +1610,8 @@ impl WinCareApp {
                     l.tr("Disable Windows transparency effects", "Désactiver les effets de transparence Windows"),
                     l.tr("Disable Acrylic / Mica Transparency Blur", "Désactivation du flou de transparence (Acrylique / Mica)"),
                     l.tr(
-                        "Sets EnableTransparency = 0 in Windows personalization settings to lighten desktop GPU rendering.",
-                        "Met EnableTransparency = 0 dans les paramètres de personnalisation Windows pour alléger le rendu graphique du bureau.",
+                        "▪ Default: Windows applies Mica and Acrylic transparency blur effects to the taskbar, Start Menu, and windows.\n▪ If enabled: Disables transparency effects (EnableTransparency = 0), reducing DWM GPU rendering overhead.\n▪ If skipped: Maintains transparency and acrylic blur effects on taskbar and applications.",
+                        "▪ Par défaut : Windows applique des effets de transparence et de flou (Mica / Acrylique) sur l'interface.\n▪ Si utilisé : Désactive la transparence (EnableTransparency = 0) pour alléger le travail de rendu GPU du bureau.\n▪ Si non utilisé : Conserve les effets de transparence et de flou sur les fenêtres et la barre des tâches.",
                     ),
                     l.tr("✔ Reversible anytime in Restore tab", "✔ Réversible à tout moment dans Restauration"),
                     false,
@@ -1571,8 +1623,8 @@ impl WinCareApp {
                     l.tr("Disable SysMain / Superfetch (only if SSD + RAM >= 8 GB)", "Désactiver SysMain / Superfetch (uniquement si SSD + RAM >= 8 Go)"),
                     l.tr("Smart SysMain (Superfetch) Service Disabling", "Désactivation intelligente du service SysMain (Superfetch)"),
                     l.tr(
-                        "SysMain preloads apps into memory but can cause unnecessary disk/RAM churn on modern PCs with fast SSDs.",
-                        "SysMain précharge des applications en mémoire mais génère parfois une activité disque/RAM inutile sur les PC modernes équipés d'un SSD rapide.",
+                        "▪ Default: SysMain (Superfetch) preloads application cache into RAM and performs periodic disk background indexing.\n▪ If enabled: Disables SysMain service safely (only if SSD + >= 8 GB RAM detected), reducing background disk writes.\n▪ If skipped: SysMain service continues running and prefetching applications.",
+                        "▪ Par défaut : SysMain (Superfetch) précharge des applications en RAM et génère des accès disque en arrière-plan.\n▪ Si utilisé : Désactive SysMain en toute sécurité (uniquement si SSD + >= 8 Go RAM), réduisant l'usure disque.\n▪ Si non utilisé : Laisse le service SysMain actif pour le préchargement d'applications en mémoire.",
                     ),
                     l.tr("✔ Safe: WinCare checks for SSD and >= 8 GB RAM before disabling", "✔ Sécurisé : WinCare vérifie que vous avez un SSD et >= 8 Go de RAM avant de le désactiver"),
                     false,
@@ -1584,8 +1636,8 @@ impl WinCareApp {
                     l.tr("Run Optimize-Volume (TRIM on SSD / Defrag on HDD)", "Exécuter Optimize-Volume (TRIM sur SSD / Défragmentation sur HDD)"),
                     l.tr("System Drive Optimization (TRIM SSD / Defrag HDD)", "Optimisation du disque système (TRIM SSD / Defrag HDD)"),
                     l.tr(
-                        "Calls official Optimize-Volume on C: drive: runs fast TRIM on SSD (maintains write speed) or defrags HDD.",
-                        "Appelle la cmdlet officielle Optimize-Volume sur le lecteur C: : exécute un TRIM rapide si c'est un SSD (maintient les performances d'écriture) ou défragmente si c'est un HDD.",
+                        "▪ Default: Windows schedules drive maintenance automatically, but TRIM frequency may lag behind heavy writes.\n▪ If enabled: Immediately triggers Optimize-Volume: executes TRIM on SSDs to maintain write speed or defrags HDDs.\n▪ If skipped: Relies on Windows background maintenance schedule to eventually optimize the system drive.",
+                        "▪ Par défaut : Windows planifie la maintenance des disques mais l'intervalle peut retarder l'envoi des commandes TRIM.\n▪ Si utilisé : Déclenche immédiatement Optimize-Volume : exécute un TRIM sur SSD (performances d'écriture) ou défragmente un HDD.\n▪ Si non utilisé : Attend le passage différé de la tâche planifiée de maintenance automatique de Windows.",
                     ),
                     l.tr("✔ 100% safe and recommended by Microsoft", "✔ 100 % sans danger et recommandé par Microsoft"),
                     false,
@@ -1775,17 +1827,16 @@ impl WinCareApp {
                                         show_rich_tooltip(
                                             ui,
                                             &format!("{}: {}", l.tr("Startup Program", "Programme au démarrage"), item.name),
-                                            &format!(
-                                                "{}: {}\n{}: {}\n\n{}",
-                                                l.tr("Command", "Commande"),
-                                                item.command,
-                                                l.tr("Source", "Source"),
-                                                item.source,
-                                                l.tr(
-                                                    "Click to toggle between [ON] (launched at Windows startup) and [OFF] (disabled at startup).",
-                                                    "Cliquez pour basculer entre [ON] (lancé au démarrage de Windows) et [OFF] (désactivé au démarrage)."
-                                                )
-                                            ),
+                                            &match l {
+                                                Lang::En => format!(
+                                                    "Command: {}\nSource: {}\n\n▪ Default: Application is registered to run automatically on Windows startup.\n▪ If enabled: Program launches automatically with Windows (ON).\n▪ If skipped: Program will not launch at boot (OFF), saving RAM and boot time.",
+                                                    item.command, item.source
+                                                ),
+                                                Lang::Fr => format!(
+                                                    "Commande : {}\nSource : {}\n\n▪ Par défaut : L'application est configurée pour démarrer automatiquement avec Windows.\n▪ Si utilisé : Le programme se lance au démarrage de votre session (ON).\n▪ Si non utilisé : Le programme est désactivé au démarrage (OFF), accélérant le boot et économisant la RAM.",
+                                                    item.command, item.source
+                                                ),
+                                            },
                                             l.tr(
                                                 "✔ Uses official Task Manager StartupApproved mechanism (no entry is deleted)",
                                                 "✔ Utilise le mécanisme officiel StartupApproved du Gestionnaire des tâches (aucune entrée n'est supprimée)"
@@ -1921,10 +1972,18 @@ impl WinCareApp {
                     self.spawn_net_diagnose();
                 }
                 ui.checkbox(&mut self.include_speedtest, l.tr("Ookla Speedtest", "Speedtest Ookla"))
-                    .on_hover_text(l.tr(
-                        "Also runs Download / Upload bandwidth test via Ookla Speedtest CLI.",
-                        "Exécute également un test de bande passante Download / Upload via Ookla Speedtest CLI.",
-                    ));
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Ookla Speedtest CLI", "Speedtest Ookla CLI"),
+                            l.tr(
+                                "▪ Default: Bandwidth speed testing is skipped during network diagnosis to save time.\n▪ If enabled: Measures real download/upload speed and latency before and after optimization via Ookla Speedtest.\n▪ If skipped: Only ping, routing, DNS benchmark, and MTU will be evaluated.",
+                                "▪ Par défaut : Le test de bande passante est ignoré lors du diagnostic réseau pour un résultat instantané.\n▪ Si utilisé : Mesure le débit descendant/montant réel et la latence avant et après optimisation via Ookla Speedtest.\n▪ Si non utilisé : Seuls le ping, la route, le benchmark DNS et le MTU sont évalués.",
+                            ),
+                            l.tr("ℹ Requires official speedtest.exe utility", "ℹ Nécessite l'exécutable officiel speedtest.exe"),
+                            false,
+                        );
+                    });
             });
         });
         ui.add_space(6.0);
@@ -1948,8 +2007,8 @@ impl WinCareApp {
                     ),
                     l.tr("Automatic Best DNS Server Configuration", "Configuration automatique du meilleur serveur DNS"),
                     l.tr(
-                        "Benchmarks Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9), and OpenDNS in real-time, applying the fastest to your active adapter.",
-                        "Teste en temps réel la latence de Cloudflare (1.1.1.1), Google (8.8.8.8), Quad9 (9.9.9.9) et OpenDNS, puis applique le plus rapide sur votre carte active.",
+                        "▪ Default: Windows uses your router or ISP default DNS, which can have slow lookup latency or content filtering.\n▪ If enabled: Tests Cloudflare, Google, Quad9, and OpenDNS in real-time, applying the lowest latency resolver.\n▪ If skipped: Retains your current DNS configuration (NextDNS is always preserved automatically).",
+                        "▪ Par défaut : Windows utilise les DNS fournis par votre box/FAI, souvent plus lents et filtrés.\n▪ Si utilisé : Teste Cloudflare, Google, Quad9 et OpenDNS en direct et configure le résolveur le plus rapide.\n▪ Si non utilisé : Conserve vos serveurs DNS actuels (NextDNS est toujours détecté et préservé).",
                     ),
                     l.tr(
                         "✔ If NextDNS is detected, your DNS is NEVER modified to preserve ad-filtering",
@@ -1964,8 +2023,8 @@ impl WinCareApp {
                     l.tr("Set optimal unfragmented MTU detected", "Régler le MTU optimal détecté sans fragmentation"),
                     l.tr("Optimal MTU (Maximum Transmission Unit) Tuning", "Calibrage du MTU (Maximum Transmission Unit)"),
                     l.tr(
-                        "Sends ICMP packets with 'Don't Fragment' flag (1500, 1492, 1472...) to discover the highest packet size passed without ISP fragmentation.",
-                        "Envoie des paquets ICMP avec le flag 'Don't Fragment' (1500, 1492, 1472...) pour trouver la taille maximale qui passe sans être découpée par votre box/FAI.",
+                        "▪ Default: Windows defaults to MTU 1500, which causes packet fragmentation if your ISP uses PPPoE or encapsulation.\n▪ If enabled: Discovers the maximum non-fragmented packet size via ICMP probes and configures your active adapter.\n▪ If skipped: Leaves MTU at its current system value, risking fragmented packets on certain network types.",
+                        "▪ Par défaut : Windows applique un MTU standard de 1500, causant des fragmentations si votre FAI utilise le PPPoE.\n▪ Si utilisé : Détecte par sondes ICMP la taille maximale de paquet sans fragmentation et l'applique à votre carte.\n▪ Si non utilisé : Conserve la valeur actuelle du MTU, avec un risque de découpage des paquets en jeu ou téléchargement.",
                     ),
                     l.tr(
                         "✔ Prevents packet loss and gaming latency (reversible in Restore tab)",
@@ -1980,8 +2039,8 @@ impl WinCareApp {
                     l.tr("Flush DNS cache (ipconfig /flushdns)", "Vider le cache DNS (ipconfig /flushdns)"),
                     l.tr("DNS Resolver Cache Purge", "Purge du cache de résolution DNS"),
                     l.tr(
-                        "Flushes DNS resolver cache so domains immediately resolve to new IP addresses.",
-                        "Vide les entrées DNS mises en cache par Windows pour résoudre immédiatement les domaines avec les nouvelles adresses IP.",
+                        "▪ Default: Windows caches DNS host-to-IP mappings locally, which can become outdated or poisoned.\n▪ If enabled: Purges the local DNS resolver cache (ipconfig /flushdns) to resolve hostnames fresh.\n▪ If skipped: Keeps current cached DNS resolutions until their natural TTL expires.",
+                        "▪ Par défaut : Windows stocke en mémoire les résolutions de domaines, pouvant garder des adresses obsolètes.\n▪ Si utilisé : Vide intégralement le cache du résolveur DNS local (ipconfig /flushdns) pour réinterroger les serveurs.\n▪ Si non utilisé : Conserve les enregistrements DNS en mémoire jusqu'à expiration de leur délai de validité (TTL).",
                     ),
                     l.tr("✔ 100% safe", "✔ 100 % sans danger"),
                     false,
@@ -1993,8 +2052,8 @@ impl WinCareApp {
                     l.tr("Wi-Fi: Disable wireless adapter power saving", "Wi-Fi : Désactiver l'économie d'énergie de la carte sans-fil"),
                     l.tr("Maximum Performance Mode for Wi-Fi Adapter", "Mode Performances Maximales pour la carte Wi-Fi"),
                     l.tr(
-                        "Sets wireless adapter power index to 0 (Maximum Performance) to prevent Wi-Fi micro-sleep states.",
-                        "Configure le profil d'alimentation de l'adaptateur sans-fil sur 0 (Performance maximale) pour empêcher la carte Wi-Fi de se mettre en micro-veille.",
+                        "▪ Default: Windows allows Wi-Fi network cards to enter power-saving micro-sleep modes when idle.\n▪ If enabled: Sets Wi-Fi adapter power management to Maximum Performance (0), stopping jitter and ping spikes.\n▪ If skipped: Preserves default Wi-Fi power saving mode, which may save slight battery on laptops.",
+                        "▪ Par défaut : Windows autorise la carte Wi-Fi à passer en micro-veille énergétique lors des temps d'inactivité.\n▪ Si utilisé : Règle l'alimentation de la carte Wi-Fi sur Performances maximales (0), éliminant le jitter et les pics de ping.\n▪ Si non utilisé : Laisse le mode d'économie d'énergie Wi-Fi actif, ce qui économise une infime quantité de batterie.",
                     ),
                     l.tr("✔ Reduces ping spikes (jitter) on Wi-Fi", "✔ Réduit les pics de ping (jitter) en Wi-Fi"),
                     false,
@@ -2006,8 +2065,8 @@ impl WinCareApp {
                     l.tr("Limit Windows Update P2P sharing (DODownloadMode = 0)", "Limiter le partage P2P de Windows Update (DODownloadMode = 0)"),
                     l.tr("Disable Windows Update Delivery Optimization P2P", "Désactivation du partage P2P Windows Update (Delivery Optimization)"),
                     l.tr(
-                        "Sets DODownloadMode = 0 to prevent Windows from consuming upload bandwidth to distribute updates to other PCs.",
-                        "Configure DODownloadMode = 0 pour empêcher Windows d'utiliser votre connexion montante (Upload) afin d'envoyer des mises à jour à d'autres PC sur Internet.",
+                        "▪ Default: Windows Delivery Optimization uploads update files to other PCs on local network and the Internet.\n▪ If enabled: Disables P2P sharing (DODownloadMode = 0), preventing Windows from saturating your upload bandwidth.\n▪ If skipped: Windows continues sharing update files in the background with external machines.",
+                        "▪ Par défaut : Windows Delivery Optimization partage vos mises à jour avec d'autres PC sur Internet en P2P.\n▪ Si utilisé : Désactive le partage P2P (DODownloadMode = 0), protégeant votre débit montant (Upload) et votre ping.\n▪ Si non utilisé : Windows continue d'utiliser votre bande passante montante pour distribuer les mises à jour.",
                     ),
                     l.tr("✔ Frees upload bandwidth and stabilizes ping", "✔ Libère la bande passante Upload et stabilise le ping"),
                     false,
@@ -2019,8 +2078,8 @@ impl WinCareApp {
                     l.tr("Disable legacy SMB1 protocol (security + performance)", "Désactiver le protocole vétuste SMB1 (sécurité + performance)"),
                     l.tr("SMBv1 Protocol Disabling", "Désactivation du protocole SMBv1"),
                     l.tr(
-                        "Disables obsolete SMB1Protocol feature if still enabled on the system.",
-                        "Désactive la fonctionnalité Windows SMB1Protocol si elle est encore active sur le système.",
+                        "▪ Default: Deprecated and insecure SMBv1 network sharing protocol may remain active on older Windows installations.\n▪ If enabled: Disables the SMB1Protocol optional feature, eliminating critical security vulnerabilities (e.g. WannaCry).\n▪ If skipped: Leaves SMBv1 active if already enabled, maintaining legacy compatibility with obsolete NAS devices.",
+                        "▪ Par défaut : Le protocole SMBv1 obsolète et vulnérable peut rester actif sur certaines installations Windows.\n▪ Si utilisé : Désactive la fonctionnalité SMB1Protocol, bloquant des failles réseau majeures (comme WannaCry).\n▪ Si non utilisé : Laisse le protocole SMB1 actif s'il est présent, maintenant la compatibilité avec de très vieux NAS.",
                     ),
                     l.tr("✔ Recommended by Microsoft (network security)", "✔ Recommandé par Microsoft (sécurité réseau)"),
                     false,
@@ -2032,8 +2091,8 @@ impl WinCareApp {
                     l.tr("Complete Winsock + TCP/IP stack reset (requires reboot)", "Reset complet des piles Winsock + TCP/IP (nécessite un redémarrage)"),
                     l.tr("Winsock & TCP/IP Stack Reset", "Réinitialisation Winsock & Pile TCP/IP"),
                     l.tr(
-                        "Runs netsh winsock reset and netsh int ip reset to repair corrupted network sockets.",
-                        "Exécute netsh winsock reset et netsh int ip reset pour réparer les sockets réseau corrompus.",
+                        "▪ Default: Network socket catalogs and TCP/IP routing tables can accumulate corrupted winsock LSPs.\n▪ If enabled: Executes netsh winsock reset and netsh int ip reset to rebuild fresh networking stacks.\n▪ If skipped: Retains existing winsock LSP providers and TCP/IP stack configuration without requiring a reboot.",
+                        "▪ Par défaut : La pile TCP/IP et le catalogue Winsock peuvent accumuler des corruptions ou règles orphelines.\n▪ Si utilisé : Exécute netsh winsock reset et netsh int ip reset pour réinitialiser les composants réseau à neuf.\n▪ Si non utilisé : Conserve la pile réseau actuelle sans nécessiter de redémarrage de la machine.",
                     ),
                     l.tr(
                         "⚠ Unchecked by default: requires a PC reboot after execution",
@@ -2048,8 +2107,8 @@ impl WinCareApp {
                     l.tr("Rerun Speedtest after optimization to compare bandwidth", "Relancer Speedtest après optimisation pour comparer le débit"),
                     l.tr("Post-Optimization Bandwidth Benchmark", "Second test de débit après optimisation"),
                     l.tr(
-                        "If speedtest.exe is present, executes another test after applying settings to measure bandwidth delta.",
-                        "Si speedtest.exe est disponible, relance un test Download/Upload après application des réglages pour mesurer le delta.",
+                        "▪ Default: Only initial connection metrics are displayed without measuring post-optimization throughput.\n▪ If enabled: Runs a secondary Ookla Speedtest after applying tweaks to display before/after bandwidth improvements.\n▪ If skipped: Finishes network optimization immediately without waiting for a second bandwidth test.",
+                        "▪ Par défaut : Seules les métriques réseau de départ sont mesurées sans second test de débit.\n▪ Si utilisé : Relance un test Ookla Speedtest après application pour quantifier précisément le gain de débit.\n▪ Si non utilisé : Termine les optimisations immédiatement sans ajouter les ~25 secondes du second test.",
                     ),
                     l.tr("ℹ Adds ~25 seconds at the end of optimization", "ℹ Ajoute ~25 secondes à la fin de l'optimisation"),
                     false,
@@ -2261,6 +2320,24 @@ impl WinCareApp {
                     let (t_title, t_desc, t_safety) = debloat_tweak_text(l, &tweak.id)
                         .unwrap_or((&tweak.title, &tweak.description, "✔ Safe Windows 11 registry setting"));
 
+                    let short_desc = if let Some(enabled_line) = t_desc.lines().find(|line| {
+                        line.starts_with("▪ If enabled:") || line.starts_with("▪ Si utilisé :") || line.starts_with("▪ Si utilisé:")
+                    }) {
+                        enabled_line
+                            .trim_start_matches("▪ If enabled:")
+                            .trim_start_matches("▪ Si utilisé :")
+                            .trim_start_matches("▪ Si utilisé:")
+                            .trim()
+                    } else if let Some(first_line) = t_desc.lines().next() {
+                        first_line
+                            .trim_start_matches("▪ Default:")
+                            .trim_start_matches("▪ Par défaut :")
+                            .trim_start_matches("▪ Par défaut:")
+                            .trim()
+                    } else {
+                        &tweak.description
+                    };
+
                     ui.horizontal(|ui| {
                         let btn_text = if tweak.is_applied {
                             RichText::new(l.tr("✔ [ACTIVE]", "✔ [ACTIF]"))
@@ -2299,40 +2376,54 @@ impl WinCareApp {
                             }
                         }
 
-                        ui.label(RichText::new(t_title).strong())
-                            .on_hover_ui(|ui| {
-                                show_rich_tooltip(
-                                    ui,
-                                    t_title,
-                                    t_desc,
-                                    t_safety,
-                                    false,
-                                );
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(t_title).strong())
+                                    .on_hover_ui(|ui| {
+                                        show_rich_tooltip(
+                                            ui,
+                                            t_title,
+                                            t_desc,
+                                            t_safety,
+                                            false,
+                                        );
+                                    });
+                                ui.label(
+                                    RichText::new("[?]")
+                                        .color(Color32::from_rgb(95, 195, 250))
+                                        .small()
+                                        .strong(),
+                                )
+                                .on_hover_ui(|ui| {
+                                    show_rich_tooltip(
+                                        ui,
+                                        t_title,
+                                        t_desc,
+                                        t_safety,
+                                        false,
+                                    );
+                                });
+                                if tweak.recommended {
+                                    ui.label(
+                                        RichText::new(l.tr("(Recommended)", "(Recommandé)"))
+                                            .color(Color32::from_rgb(100, 200, 255))
+                                            .small(),
+                                    );
+                                }
                             });
-                        ui.label(
-                            RichText::new("[?]")
-                                .color(Color32::from_rgb(95, 195, 250))
-                                .small()
-                                .strong(),
-                        )
-                        .on_hover_ui(|ui| {
-                            show_rich_tooltip(
-                                ui,
-                                t_title,
-                                t_desc,
-                                t_safety,
-                                false,
-                            );
+                            ui.label(RichText::new(short_desc).weak().small())
+                                .on_hover_ui(|ui| {
+                                    show_rich_tooltip(
+                                        ui,
+                                        t_title,
+                                        t_desc,
+                                        t_safety,
+                                        false,
+                                    );
+                                });
                         });
-                        if tweak.recommended {
-                            ui.label(
-                                RichText::new(l.tr("(Recommended)", "(Recommandé)"))
-                                    .color(Color32::from_rgb(100, 200, 255))
-                                    .small(),
-                            );
-                        }
-                        ui.label(RichText::new(format!("— {}", t_desc)).weak());
                     });
+                    ui.add_space(2.0);
                 }
             });
             ui.add_space(4.0);
@@ -2366,8 +2457,8 @@ impl WinCareApp {
                         "Restauration du plan d'alimentation Équilibré",
                     ),
                     l.tr(
-                        "Executes powercfg /setactive SCHEME_BALANCED to return to Windows standard power mode.",
-                        "Exécute powercfg /setactive SCHEME_BALANCED pour revenir au mode d'alimentation standard de Windows.",
+                        "▪ Default: System is running on High Performance or Ultimate Performance power scheme.\n▪ If enabled: Activates the official Windows Balanced power scheme (SCHEME_BALANCED).\n▪ If skipped: Keeps current High or Ultimate Performance power plan active.",
+                        "▪ Par défaut : Le PC utilise un profil Performances élevées ou Ultimate Performance.\n▪ Si utilisé : Réactive le mode d'alimentation Équilibré officiel de Windows (SCHEME_BALANCED).\n▪ Si non utilisé : Conserve le plan d'alimentation haute performance actuellement actif.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2385,8 +2476,8 @@ impl WinCareApp {
                         "Restauration des effets visuels par défaut",
                     ),
                     l.tr(
-                        "Sets VisualFXSetting = 0 to let Windows enable window animations and drop shadows.",
-                        "Remet VisualFXSetting = 0 pour laisser Windows activer toutes les animations et ombres des fenêtres.",
+                        "▪ Default: Visual effects are stripped down to Best Performance (animations disabled).\n▪ If enabled: Restores default Windows visual effects, animations, and drop shadows (VisualFXSetting = 0).\n▪ If skipped: Keeps fast minimal visual effects without animations.",
+                        "▪ Par défaut : Les effets visuels sont réduits au mode Meilleures performances (animations coupées).\n▪ Si utilisé : Restaure les animations et ombres portées par défaut de Windows (VisualFXSetting = 0).\n▪ Si non utilisé : Conserve l'interface réactive et allégée sans animations.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2404,8 +2495,8 @@ impl WinCareApp {
                         "Réactivation de la transparence",
                     ),
                     l.tr(
-                        "Sets EnableTransparency = 1 to re-enable blur effects on taskbar and windows.",
-                        "Remet EnableTransparency = 1 pour réactiver les effets de flou sur la barre des tâches et les fenêtres.",
+                        "▪ Default: Transparency blur effects are disabled to save GPU resources.\n▪ If enabled: Re-enables Mica and Acrylic transparency on taskbar and windows (EnableTransparency = 1).\n▪ If skipped: Leaves transparency disabled for lighter graphics rendering.",
+                        "▪ Par défaut : Les effets de transparence sont désactivés pour alléger le rendu graphique.\n▪ Si utilisé : Réactive la transparence Mica et Acrylique sur la barre des tâches et fenêtres (EnableTransparency = 1).\n▪ Si non utilisé : Maintient la transparence désactivée pour économiser les ressources GPU.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2423,8 +2514,8 @@ impl WinCareApp {
                         "Réactivation du service SysMain",
                     ),
                     l.tr(
-                        "Sets SysMain startup type to Automatic and starts the service immediately.",
-                        "Configure le service SysMain en démarrage Automatique et le démarre immédiatement.",
+                        "▪ Default: SysMain (Superfetch) service is stopped and disabled in Windows Services.\n▪ If enabled: Sets SysMain startup type back to Automatic and starts the service immediately.\n▪ If skipped: Leaves SysMain service disabled, preventing background caching.",
+                        "▪ Par défaut : Le service SysMain (Superfetch) est arrêté et désactivé dans les services Windows.\n▪ Si utilisé : Remet le service SysMain en démarrage Automatique et le démarre immédiatement.\n▪ Si non utilisé : Laisse le service SysMain désactivé sans préchargement d'applications.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2442,8 +2533,8 @@ impl WinCareApp {
                         "Désactivation de Storage Sense",
                     ),
                     l.tr(
-                        "Sets StoragePolicy '01' to 0 to disable periodic automated cleanup.",
-                        "Remet la clé StoragePolicy '01' à 0 pour désactiver le nettoyage automatique périodique.",
+                        "▪ Default: Storage Sense automated cleanup is active and scheduled every 30 days.\n▪ If enabled: Disables automated Storage Sense cleanup policy in Windows settings.\n▪ If skipped: Keeps Storage Sense enabled to purge temporary files periodically.",
+                        "▪ Par défaut : L'Assistant Stockage automatique est configuré pour purger les fichiers tous les 30 jours.\n▪ Si utilisé : Désactive le nettoyage automatique périodique de l'Assistant Stockage.\n▪ Si non utilisé : Maintient le nettoyage périodique automatique actif.",
                     ),
                     l.tr("✔ Safe", "✔ Sans danger"),
                     false,
@@ -2461,8 +2552,8 @@ impl WinCareApp {
                         "Réactivation de Xbox Game Bar & GameDVR",
                     ),
                     l.tr(
-                        "Restores AutoGameModeEnabled = 1, AllowAutoGameMode = 1 and GameDVR_Enabled = 1.",
-                        "Remet AutoGameModeEnabled = 1, AllowAutoGameMode = 1 et GameDVR_Enabled = 1.",
+                        "▪ Default: Xbox GameDVR background recording and Game Bar popups are turned off.\n▪ If enabled: Restores default Windows Xbox Game Bar overlay and GameDVR capture features.\n▪ If skipped: Leaves GameDVR and Xbox Game Bar background capture disabled.",
+                        "▪ Par défaut : L'enregistrement GameDVR et l'overlay Xbox Game Bar sont désactivés.\n▪ Si utilisé : Réactive l'overlay Xbox Game Bar et la capture automatique en arrière-plan.\n▪ Si non utilisé : Maintient GameDVR et la Game Bar désactivés pour préserver les performances en jeu.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2483,8 +2574,8 @@ impl WinCareApp {
                         "Restauration des DNS automatiques de votre Box / FAI",
                     ),
                     l.tr(
-                        "Executes Set-DnsClientServerAddress -ResetServerAddresses on active network adapter.",
-                        "Exécute Set-DnsClientServerAddress -ResetServerAddresses sur votre carte réseau active.",
+                        "▪ Default: Network adapter uses static public DNS resolvers (Cloudflare, Google, Quad9).\n▪ If enabled: Resets DNS configuration to automatic DHCP assignment from your router / ISP.\n▪ If skipped: Preserves current static fast DNS server addresses on your adapter.",
+                        "▪ Par défaut : La carte réseau utilise des serveurs DNS publics statiques (Cloudflare, Google...).\n▪ Si utilisé : Rétablit l'attribution automatique des serveurs DNS par DHCP (votre Box / FAI).\n▪ Si non utilisé : Conserve les serveurs DNS rapides actuels configurés sur votre carte.",
                     ),
                     l.tr(
                         "⚠ Uncheck if you use NextDNS configured via static IP address",
@@ -2512,8 +2603,8 @@ impl WinCareApp {
                         "Restauration du MTU = 1500",
                     ),
                     l.tr(
-                        "Resets standard packet size MTU = 1500 on active network adapter via netsh.",
-                        "Remet la taille de paquet standard MTU = 1500 sur la carte réseau active via netsh.",
+                        "▪ Default: MTU size is tuned to a custom unfragmented value (e.g. 1472, 1492).\n▪ If enabled: Resets standard Maximum Transmission Unit MTU = 1500 on your active network adapter.\n▪ If skipped: Retains the tuned custom MTU packet size.",
+                        "▪ Par défaut : Le MTU est calibré sur une valeur personnalisée sans fragmentation (ex: 1472, 1492).\n▪ Si utilisé : Rétablit la taille de paquet standard MTU = 1500 sur votre carte réseau active.\n▪ Si non utilisé : Conserve la valeur optimisée actuelle du MTU.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2531,8 +2622,8 @@ impl WinCareApp {
                         "Restauration de Delivery Optimization",
                     ),
                     l.tr(
-                        "Deletes DODownloadMode in HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization.",
-                        "Supprime la valeur DODownloadMode dans HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization.",
+                        "▪ Default: Delivery Optimization P2P sharing is locked to 0 to save upload bandwidth.\n▪ If enabled: Restores original Windows Update Delivery Optimization cloud sharing policy.\n▪ If skipped: Keeps Windows Update P2P upload sharing disabled.",
+                        "▪ Par défaut : Le partage P2P de Delivery Optimization est bridé à 0 pour protéger l'Upload.\n▪ Si utilisé : Restaure le comportement par défaut de partage de mises à jour de Windows Update.\n▪ Si non utilisé : Maintient le blocage du partage P2P de mises à jour vers l'extérieur.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2550,8 +2641,8 @@ impl WinCareApp {
                         "Restauration de l'économie d'énergie Wi-Fi",
                     ),
                     l.tr(
-                        "Restores wireless adapter power saving index to its default value (3).",
-                        "Remet l'indice d'économie d'énergie de l'adaptateur sans-fil à sa valeur par défaut (3).",
+                        "▪ Default: Wireless network adapter is configured for Maximum Performance (power saving 0).\n▪ If enabled: Restores default Wi-Fi power saving mode index (3) to optimize battery life.\n▪ If skipped: Keeps Wi-Fi adapter in continuous Maximum Performance mode for low latency.",
+                        "▪ Par défaut : La carte Wi-Fi est forcée en Performances maximales (indice d'économie 0).\n▪ Si utilisé : Rétablit l'indice d'économie d'énergie Wi-Fi standard (3) pour préserver la batterie.\n▪ Si non utilisé : Maintient la carte Wi-Fi en performance maximale sans micro-sommeil.",
                     ),
                     l.tr("✔ Original Windows default", "✔ Valeur d'origine Windows"),
                     false,
@@ -2696,5 +2787,29 @@ mod tests {
 
         assert_eq!(ActiveTab::Restore.label(Lang::En), "↩ Restore (.RESTORE)");
         assert_eq!(ActiveTab::Restore.label(Lang::Fr), "↩ Restauration (.RESTORE)");
+    }
+
+    #[test]
+    fn test_parse_tooltip_line() {
+        let def_en = parse_tooltip_line("▪ Default: sample text");
+        assert!(def_en.is_some());
+        let (p, c, r) = def_en.unwrap();
+        assert_eq!(p, "▪ Default:");
+        assert_eq!(c, Color32::from_rgb(150, 200, 255));
+        assert_eq!(r, " sample text");
+
+        let enab_fr = parse_tooltip_line("▪ Si utilisé : sample text");
+        assert!(enab_fr.is_some());
+        let (p2, c2, _) = enab_fr.unwrap();
+        assert_eq!(p2, "▪ Si utilisé :");
+        assert_eq!(c2, Color32::from_rgb(100, 235, 160));
+
+        let skip_en = parse_tooltip_line("▪ If skipped: sample text");
+        assert!(skip_en.is_some());
+        let (p3, c3, _) = skip_en.unwrap();
+        assert_eq!(p3, "▪ If skipped:");
+        assert_eq!(c3, Color32::from_rgb(235, 190, 110));
+
+        assert!(parse_tooltip_line("Regular line").is_none());
     }
 }
