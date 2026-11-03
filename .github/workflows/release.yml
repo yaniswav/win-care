@@ -1,0 +1,39 @@
+name: Release WinCare
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test
+
+      - name: Build optimized Release binary
+        run: cargo build --release
+
+      - name: Rename binary to WinCare.exe
+        run: Copy-Item "target\release\win-care.exe" "WinCare.exe"
+
+      - name: Upload Release Asset (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: WinCare.exe
+          generate_release_notes: true
