@@ -3,13 +3,11 @@ use crate::runner::Runner;
 use crate::types::WinCareProfile;
 
 pub fn default_profile_path() -> PathBuf {
-    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        let desktop = PathBuf::from(user_profile).join("Desktop");
-        if desktop.exists() {
-            return desktop.join("wincare-profile.json");
-        }
+    let logs_dir = crate::logger::resolve_logs_dir();
+    if let Some(parent) = logs_dir.parent() {
+        return parent.join("wincare-profile.json");
     }
-    PathBuf::from("wincare-profile.json")
+    logs_dir.join("wincare-profile.json")
 }
 
 pub fn export_profile(runner: &Runner, profile: &WinCareProfile) -> Option<PathBuf> {

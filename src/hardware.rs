@@ -101,10 +101,8 @@ pub fn generate_battery_report(runner: &Runner) -> Option<PathBuf> {
     runner
         .logger
         .section("GÉNÉRATION DU RAPPORT DE BATTERIE");
-    let user_profile =
-        std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Default".to_string());
-    let desktop_dir = PathBuf::from(user_profile).join("Desktop");
-    let report_path = desktop_dir.join("WinCare_Battery_Report.html");
+    let logs_dir = crate::logger::resolve_logs_dir();
+    let report_path = logs_dir.join("WinCare_Battery_Report.html");
     let path_str = report_path.to_string_lossy().to_string();
 
     if runner.dry_run {

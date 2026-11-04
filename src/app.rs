@@ -4133,8 +4133,8 @@ impl WinCareApp {
                     .add_enabled(
                         !self.is_busy,
                         egui::Button::new(l.tr(
-                            "📄 Generate Battery HTML Report (Desktop)",
-                            "📄 Générer le rapport HTML Batterie (Bureau)",
+                            "📄 Generate Battery HTML Report (logs/)",
+                            "📄 Générer le rapport HTML Batterie (logs/)",
                         )),
                     )
                     .on_hover_ui(|ui| {
@@ -4498,6 +4498,29 @@ impl WinCareApp {
             )).strong());
             ui.label(RichText::new(format!("({})", self.log_file_path.display())).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button(l.tr("📂 Open Folder", "📂 Dossier logs"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Open Logs Directory", "Ouvrir le dossier des journaux"),
+                            l.tr(
+                                "Opens the dedicated logs folder in Windows File Explorer.\n▪ Default: Session logs and HTML reports are stored inside the dedicated logs/ folder.\n▪ If enabled: Opens File Explorer directly in the logs/ directory.\n▪ If skipped: Does nothing.",
+                                "Ouvre le dossier dédié aux fichiers journaux dans l'Explorateur Windows.\n▪ Par défaut : Tous les logs et rapports HTML sont rangés proprement dans le sous-dossier logs/.\n▪ Si utilisé : Ouvre l'Explorateur directement dans le dossier logs/.\n▪ Si non utilisé : N'ouvre aucune fenêtre.",
+                            ),
+                            l.tr("✔ Safe read-only action", "✔ Action de consultation sans danger"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
+                    let dir = self
+                        .log_file_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(crate::logger::resolve_logs_dir);
+                    let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
+                }
                 if ui
                     .small_button(l.tr("Clear", "Effacer"))
                     .on_hover_ui(|ui| {
