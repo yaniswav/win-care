@@ -69,6 +69,10 @@ pub enum WorkerEvent {
     DebloatListUpdated(Vec<DebloatTweakStatus>),
     UpdateCheckReady(Option<crate::updater::UpdateInfo>),
     WingetListReady(Vec<WingetUpgradeItem>),
+    WingetItemStatus {
+        id: String,
+        state: WingetPkgState,
+    },
     AppxListReady(Vec<AppxBloatItem>),
     GamingStatusReady(GamingStatus),
     BatterySmartReady(BatteryAndSmartInfo),
@@ -422,12 +426,25 @@ pub struct MetricDiff {
     pub improved: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum WingetPkgState {
+    #[default]
+    Available,
+    Queued,
+    Upgrading(String),
+    Updated,
+    Failed(String),
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WingetUpgradeItem {
     pub name: String,
     pub id: String,
     pub current_version: String,
     pub available_version: String,
+    #[serde(default)]
+    pub state: WingetPkgState,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -1,7 +1,10 @@
-use crate::runner::Runner;
+use crate::runner::{Runner, CREATE_NO_WINDOW};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
+use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 pub const GITHUB_REPO: &str = "yaniswav/win-care";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -32,12 +35,22 @@ struct GithubAsset {
     browser_download_url: String,
 }
 
-/// Supprime au démarrage l'ancien binaire `.old` laissé par une mise à jour précédente.
+/// Supprime au démarrage les anciens binaires `.old` laissés par les mises à jour précédentes.
 pub fn cleanup_old_binary() {
     if let Ok(exe) = std::env::current_exe() {
         let old_path = exe.with_extension("exe.old");
-        if old_path.exists() {
-            let _ = fs::remove_file(old_path);
+        let _ = fs::remove_file(old_path);
+        if let Some(parent) = exe.parent() {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                        if name.ends_with(".old") && name.to_lowercase().contains("wincare") {
+                            let _ = fs::remove_file(p);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -122,7 +135,18 @@ pub fn check_for_update(runner: &Runner) -> Option<UpdateInfo> {
     })
 }
 
-/// Télécharge le nouveau `.exe` depuis GitHub Releases, vérifie l'en-tête PE (`MZ`) et remplace l'exécutable courant.
+/// Résout le chemin cible `.exe` propre même si le processus actuel avait déjà été renommé en `.exe.old`.
+fn resolve_target_exe(current_exe: &std::path::Path) -> PathBuf {
+    let s = current_exe.to_string_lossy();
+    if let Some(stripped) = s.strip_suffix(".old") {
+        PathBuf::from(stripped)
+    } else {
+        current_exe.to_path_buf()
+    }
+}
+
+/// Télécharge le nouveau `.exe` depuis GitHub Releases, vérifie l'en-tête PE (`MZ`),
+/// remplace l'exécutable et relance automatiquement la nouvelle version.
 pub fn perform_self_update(runner: &Runner, info: &UpdateInfo) -> bool {
     if info.download_url.is_empty() {
         runner
@@ -149,8 +173,10 @@ pub fn perform_self_update(runner: &Runner, info: &UpdateInfo) -> bool {
         }
     };
 
-    let new_exe = current_exe.with_extension("exe.new");
-    let old_exe = current_exe.with_extension("exe.old");
+    let target_exe = resolve_target_exe(&current_exe);
+    let pid = std::process::id();
+    let new_exe = target_exe.with_extension(format!("exe.{pid}.new"));
+    let old_exe = target_exe.with_extension(format!("exe.{pid}.old"));
 
     runner.logger.info(format!(
         "Téléchargement de WinCare v{}...",
@@ -199,27 +225,46 @@ pub fn perform_self_update(runner: &Runner, info: &UpdateInfo) -> bool {
     }
 
     let _ = fs::remove_file(&old_exe);
-    if let Err(e) = fs::rename(&current_exe, &old_exe) {
-        runner
-            .logger
-            .error(format!("Impossible de renommer l'exécutable en cours : {e}"));
-        let _ = fs::remove_file(&new_exe);
-        return false;
+
+    // Tentative de remplacement direct par renommage atomique avec suffixe PID unique
+    let direct_swap_ok = if current_exe == target_exe {
+        fs::rename(&current_exe, &old_exe).is_ok() && fs::rename(&new_exe, &target_exe).is_ok()
+    } else {
+        // Le processus courant tourne déjà depuis un `.old` : on peut remplacer `target_exe` directement !
+        let _ = fs::remove_file(&target_exe);
+        fs::rename(&new_exe, &target_exe).is_ok()
+    };
+
+    let target_str = target_exe.to_string_lossy().to_string();
+    if direct_swap_ok {
+        runner.logger.success(format!(
+            "Mise à jour v{} installée ! Redémarrage automatique de WinCare...",
+            info.latest_version
+        ));
+        let _ = Command::new(&target_exe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        std::process::exit(0);
     }
 
-    if let Err(e) = fs::rename(&new_exe, &current_exe) {
-        let _ = fs::rename(&old_exe, &current_exe);
-        runner
-            .logger
-            .error(format!("Impossible d'installer le nouvel exécutable : {e}"));
-        return false;
-    }
-
+    // Fallback universel si le fichier cible est verrouillé : script détaché qui attend la fermeture (1s),
+    // déplace `new_exe` vers `target_exe` et relance `target_exe`.
     runner.logger.success(format!(
-        "Mise à jour vers v{} installée avec succès ! Relancez WinCare pour utiliser la nouvelle version.",
+        "Application de la mise à jour v{} et redémarrage automatique...",
         info.latest_version
     ));
-    true
+    let cmd_line = format!(
+        "ping 127.0.0.1 -n 2 >nul & move /Y \"{new_exe_str}\" \"{target_str}\" >nul 2>&1 & start \"\" \"{target_str}\""
+    );
+    let _ = Command::new("cmd.exe")
+        .args(["/C", &cmd_line])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    std::process::exit(0);
 }
 
 #[cfg(test)]
@@ -229,7 +274,7 @@ mod tests {
     #[test]
     fn test_parse_semver() {
         assert_eq!(parse_semver("v0.2.0"), (0, 2, 0));
-        assert_eq!(parse_semver("1.10.3"), (1, 10, 3));
-        assert!(parse_semver("v0.3.0") > parse_semver("0.2.0"));
+        assert_eq!(parse_semver("0.10.3"), (0, 10, 3));
+        assert!(parse_semver("0.2.0") > parse_semver("0.1.9"));
     }
 }

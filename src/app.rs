@@ -5,7 +5,7 @@ use crate::types::{
     AppxBloatItem, BatteryAndSmartInfo, DebloatCategory, DebloatTweakStatus, GamingStatus,
     LogEntry, LogLevel, MetricDiff, NetDiagnosis, NetOptimOptions, PcCleanOptions, PcDiagnosis,
     PcOptimOptions, RepairTask, RestoreOptions, StartupItem, TempSubfolderInfo, WinCareProfile,
-    WingetUpgradeItem, WorkerEvent,
+    WingetPkgState, WingetUpgradeItem, WorkerEvent,
 };
 use eframe::egui::{self, Color32, RichText};
 use std::collections::HashSet;
@@ -210,6 +210,7 @@ pub struct WinCareApp {
     // Onglet Apps & Bloatware
     winget_items: Vec<WingetUpgradeItem>,
     selected_winget_ids: HashSet<String>,
+    winget_has_scanned: bool,
     appx_items: Vec<AppxBloatItem>,
     selected_appx_patterns: HashSet<String>,
 
@@ -326,6 +327,7 @@ impl WinCareApp {
             debloat_tweaks,
             winget_items: Vec::new(),
             selected_winget_ids: HashSet::new(),
+            winget_has_scanned: false,
             appx_items,
             selected_appx_patterns: HashSet::new(),
             gaming_status: None,
@@ -399,11 +401,20 @@ impl WinCareApp {
                     self.update_info = info;
                 }
                 WorkerEvent::WingetListReady(items) => {
+                    self.winget_has_scanned = true;
                     self.selected_winget_ids.clear();
                     for item in &items {
                         self.selected_winget_ids.insert(item.id.clone());
                     }
                     self.winget_items = items;
+                }
+                WorkerEvent::WingetItemStatus { id, state } => {
+                    if let Some(item) = self.winget_items.iter_mut().find(|it| it.id == id) {
+                        item.state = state.clone();
+                    }
+                    if matches!(state, WingetPkgState::Updated) {
+                        self.selected_winget_ids.remove(&id);
+                    }
                 }
                 WorkerEvent::AppxListReady(items) => {
                     self.selected_appx_patterns.clear();
@@ -1070,6 +1081,7 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
+        self.winget_has_scanned = true;
         self.progress_current = 1;
         self.progress_total = 1;
         let l = self.lang;
@@ -1113,8 +1125,6 @@ impl WinCareApp {
                 need_reboot: false,
             };
             crate::winget::upgrade_winget_packages(&runner, &ids);
-            let items = crate::winget::scan_winget_upgrades(&runner);
-            runner.logger.send_event(WorkerEvent::WingetListReady(items));
         });
     }
 
@@ -1122,14 +1132,31 @@ impl WinCareApp {
         if self.is_busy {
             return;
         }
+        if !self.winget_items.is_empty() {
+            let all_ids: Vec<String> = self
+                .winget_items
+                .iter()
+                .filter(|it| it.state != WingetPkgState::Updated)
+                .map(|it| it.id.clone())
+                .collect();
+            for id in &all_ids {
+                self.selected_winget_ids.insert(id.clone());
+            }
+            if !all_ids.is_empty() {
+                self.spawn_upgrade_winget(all_ids);
+            }
+            return;
+        }
+
         self.is_busy = true;
-        self.progress_current = 1;
+        self.winget_has_scanned = true;
+        self.progress_current = 0;
         self.progress_total = 1;
         let l = self.lang;
         self.progress_label = l
             .tr(
-                "Upgrading all packages via WinGet (--all --silent)...",
-                "Mise à jour globale de tous les logiciels via WinGet...",
+                "Scanning & upgrading all packages via WinGet...",
+                "Recherche et mise à jour de tous les logiciels via WinGet...",
             )
             .to_string();
         let runner = self.make_runner();
@@ -1141,9 +1168,14 @@ impl WinCareApp {
                     .to_string(),
                 need_reboot: false,
             };
-            crate::winget::upgrade_all_winget(&runner);
             let items = crate::winget::scan_winget_upgrades(&runner);
-            runner.logger.send_event(WorkerEvent::WingetListReady(items));
+            runner
+                .logger
+                .send_event(WorkerEvent::WingetListReady(items.clone()));
+            let all_ids: Vec<String> = items.into_iter().map(|it| it.id).collect();
+            if !all_ids.is_empty() {
+                crate::winget::upgrade_winget_packages(&runner, &all_ids);
+            }
         });
     }
 
@@ -3527,30 +3559,7 @@ impl WinCareApp {
                     self.spawn_upgrade_all_winget();
                 }
 
-                if self.is_busy {
-                    if ui
-                        .button(
-                            RichText::new(l.tr("⏹ Stop Upgrade", "⏹ Annuler MAJ"))
-                                .color(Color32::from_rgb(255, 110, 110))
-                                .strong(),
-                        )
-                        .on_hover_ui(|ui| {
-                            show_rich_tooltip(
-                                ui,
-                                l.tr("Stop WinGet Upgrade", "Annuler les mises à jour WinGet"),
-                                l.tr(
-                                    "Aborts the ongoing WinGet upgrade immediately.\n▪ Default: Upgrades all selected packages sequentially.\n▪ If enabled: Kills the running winget.exe process and stops the upgrade queue.\n▪ If skipped: Continues upgrading remaining packages.",
-                                    "Interrompt immédiatement les mises à jour WinGet en cours.\n▪ Par défaut : Met à jour tous les paquets sélectionnés à la suite.\n▪ Si utilisé : Tue le processus winget.exe en cours et stoppe la file d'attente.\n▪ Si non utilisé : Poursuit la mise à jour des paquets restants.",
-                                ),
-                                l.tr("✔ Stops winget.exe immediately", "✔ Arrête winget.exe immédiatement"),
-                                true,
-                            );
-                        })
-                        .clicked()
-                    {
-                        self.cancel_current_task();
-                    }
-                }
+
 
                 if self.is_busy {
                     if ui
@@ -3596,7 +3605,9 @@ impl WinCareApp {
                         .clicked()
                     {
                         for item in &self.winget_items {
-                            self.selected_winget_ids.insert(item.id.clone());
+                            if item.state != WingetPkgState::Updated {
+                                self.selected_winget_ids.insert(item.id.clone());
+                            }
                         }
                     }
                     if ui
@@ -3620,20 +3631,140 @@ impl WinCareApp {
                 }
             });
 
-            ui.add_space(4.0);
+            ui.add_space(6.0);
+
+            // Bandeau de résumé clair avec compteurs colorés si la liste n'est pas vide
+            if !self.winget_items.is_empty() {
+                let total_count = self.winget_items.len();
+                let sel_count = self.selected_winget_ids.len();
+                let in_progress_count = self
+                    .winget_items
+                    .iter()
+                    .filter(|it| matches!(it.state, WingetPkgState::Upgrading(_) | WingetPkgState::Queued))
+                    .count();
+                let updated_count = self
+                    .winget_items
+                    .iter()
+                    .filter(|it| matches!(it.state, WingetPkgState::Updated))
+                    .count();
+                let failed_count = self
+                    .winget_items
+                    .iter()
+                    .filter(|it| matches!(it.state, WingetPkgState::Failed(_)))
+                    .count();
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("📦 {} : {}", l.tr("Total", "Total"), total_count))
+                            .color(Color32::from_rgb(200, 205, 215))
+                            .strong(),
+                    );
+                    ui.label(RichText::new("|").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(format!(
+                            "☑ {} : {}",
+                            l.tr("Selected", "Sélectionnés"),
+                            sel_count
+                        ))
+                        .color(Color32::from_rgb(100, 185, 255))
+                        .strong(),
+                    );
+                    ui.label(RichText::new("|").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(format!(
+                            "🔄 {} : {}",
+                            l.tr("In progress", "En cours"),
+                            in_progress_count
+                        ))
+                        .color(Color32::from_rgb(245, 195, 65))
+                        .strong(),
+                    );
+                    ui.label(RichText::new("|").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(format!(
+                            "✔ {} : {}",
+                            l.tr("Updated", "Mis à jour"),
+                            updated_count
+                        ))
+                        .color(Color32::from_rgb(80, 230, 120))
+                        .strong(),
+                    );
+                    ui.label(RichText::new("|").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ {} : {}",
+                            l.tr("Failed", "Échecs"),
+                            failed_count
+                        ))
+                        .color(Color32::from_rgb(255, 110, 110))
+                        .strong(),
+                    );
+                });
+                ui.add_space(4.0);
+            }
+
+            // Encadré bleu/cyan bien visible juste au-dessus du tableau si un paquet est en cours d'installation
+            if let Some(upg_item) = self
+                .winget_items
+                .iter()
+                .find(|it| matches!(it.state, WingetPkgState::Upgrading(_)))
+            {
+                egui::Frame::group(ui.style())
+                    .fill(Color32::from_rgba_unmultiplied(15, 35, 60, 230))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 175, 255)))
+                    .rounding(6.0_f32)
+                    .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(match l {
+                                    Lang::En => format!(
+                                        "🔄 Installing: {} ({} → {}) — Downloading & running official installer in background...",
+                                        upg_item.name, upg_item.current_version, upg_item.available_version
+                                    ),
+                                    Lang::Fr => format!(
+                                        "🔄 En cours d'installation : {} ({} → {}) — Téléchargement et exécution de l'installateur officiel en tâche de fond...",
+                                        upg_item.name, upg_item.current_version, upg_item.available_version
+                                    ),
+                                })
+                                .color(Color32::from_rgb(110, 220, 255))
+                                .strong(),
+                            );
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+
             if self.winget_items.is_empty() {
-                ui.label(RichText::new(l.tr(
-                    "No updates detected or scan not performed yet. Click 'Scan for Updates (WinGet)' to check.",
-                    "Aucune mise à jour détectée ou scan non effectué. Cliquez sur 'Scanner les mises à jour (WinGet)'.",
-                )).weak());
+                if self.winget_has_scanned {
+                    ui.label(
+                        RichText::new(l.tr(
+                            "✔ All software is up to date! (0 outdated packages detected via WinGet)",
+                            "✔ Tous vos logiciels sont à jour ! (0 mise à jour détectée via WinGet)",
+                        ))
+                        .color(Color32::from_rgb(80, 225, 130))
+                        .strong(),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(l.tr(
+                            "No updates detected or scan not performed yet. Click 'Scan for Updates (WinGet)' to check.",
+                            "Aucune mise à jour détectée ou scan non effectué. Cliquez sur 'Scanner les mises à jour (WinGet)'.",
+                        ))
+                        .weak(),
+                    );
+                }
             } else {
+                let mut single_upgrade_id: Option<String> = None;
+
                 egui::ScrollArea::vertical()
                     .id_salt("winget_list_scroll")
-                    .max_height(250.0)
+                    .max_height(280.0)
                     .show(ui, |ui| {
                         egui::Grid::new("winget_table_grid")
                             .striped(true)
-                            .min_col_width(60.0)
+                            .min_col_width(55.0)
                             .show(ui, |ui| {
                                 ui.strong("");
                                 ui.strong(l.tr("Application", "Application"));
@@ -3641,18 +3772,24 @@ impl WinCareApp {
                                 ui.strong(l.tr("Current", "Version Actuelle"));
                                 ui.strong("");
                                 ui.strong(l.tr("Available", "Disponible"));
+                                ui.strong(l.tr("Status / Action", "État / Action"));
                                 ui.end_row();
 
                                 for item in &self.winget_items {
-                                    let mut is_selected = self.selected_winget_ids.contains(&item.id);
+                                    let mut is_selected =
+                                        self.selected_winget_ids.contains(&item.id);
                                     let item_name = item.name.clone();
                                     let item_id = item.id.clone();
                                     let cur_ver = item.current_version.clone();
                                     let avail_ver = item.available_version.clone();
+                                    let is_updated = matches!(item.state, WingetPkgState::Updated);
 
                                     ui.push_id(&item.id, |ui| {
                                         if ui
-                                            .checkbox(&mut is_selected, "")
+                                            .add_enabled(
+                                                !is_updated,
+                                                egui::Checkbox::new(&mut is_selected, ""),
+                                            )
                                             .on_hover_ui(|ui| {
                                                 show_rich_tooltip(
                                                     ui,
@@ -3687,11 +3824,93 @@ impl WinCareApp {
                                     ui.label(RichText::new(&item.id).weak());
                                     ui.label(&item.current_version);
                                     ui.label("→");
-                                    ui.label(RichText::new(&item.available_version).color(Color32::from_rgb(80, 225, 130)).strong());
+                                    ui.label(
+                                        RichText::new(&item.available_version)
+                                            .color(Color32::from_rgb(80, 225, 130))
+                                            .strong(),
+                                    );
+
+                                    // Colonne État / Action
+                                    ui.horizontal(|ui| match &item.state {
+                                        WingetPkgState::Available => {
+                                            ui.label(RichText::new(l.tr("Ready", "Prêt")).weak());
+                                            if ui
+                                                .add_enabled(
+                                                    !self.is_busy,
+                                                    egui::Button::new(
+                                                        RichText::new(
+                                                            l.tr("⬆ Update", "⬆ Mettre à jour"),
+                                                        )
+                                                        .size(11.0),
+                                                    ),
+                                                )
+                                                .on_hover_text(l.tr(
+                                                    "Update only this application immediately",
+                                                    "Mettre à jour uniquement cette application immédiatement",
+                                                ))
+                                                .clicked()
+                                            {
+                                                single_upgrade_id = Some(item.id.clone());
+                                            }
+                                        }
+                                        WingetPkgState::Queued => {
+                                            ui.label(
+                                                RichText::new(
+                                                    l.tr("⏳ Queued", "⏳ En file d'attente"),
+                                                )
+                                                .color(Color32::from_rgb(240, 200, 80))
+                                                .strong(),
+                                            );
+                                        }
+                                        WingetPkgState::Upgrading(stage) => {
+                                            ui.spinner();
+                                            let stage_text = if stage.is_empty() {
+                                                l.tr("🔄 Installing...", "🔄 Installation en cours...")
+                                            } else {
+                                                stage.as_str()
+                                            };
+                                            ui.label(
+                                                RichText::new(stage_text)
+                                                    .color(Color32::from_rgb(70, 215, 255))
+                                                    .strong(),
+                                            );
+                                        }
+                                        WingetPkgState::Updated => {
+                                            ui.label(
+                                                RichText::new(
+                                                    l.tr("✔ Updated!", "✔ Mis à jour !"),
+                                                )
+                                                .color(Color32::from_rgb(80, 230, 120))
+                                                .strong(),
+                                            );
+                                        }
+                                        WingetPkgState::Failed(err) => {
+                                            let badge = ui.label(
+                                                RichText::new(l.tr("⚠ Failed", "⚠ Échec"))
+                                                    .color(Color32::from_rgb(255, 110, 110))
+                                                    .strong(),
+                                            );
+                                            if !err.is_empty() {
+                                                badge.on_hover_text(err.as_str());
+                                            }
+                                        }
+                                        WingetPkgState::Cancelled => {
+                                            ui.label(
+                                                RichText::new(l.tr("⏹ Cancelled", "⏹ Annulé"))
+                                                    .color(Color32::from_rgb(210, 150, 110)),
+                                            );
+                                        }
+                                    });
+
                                     ui.end_row();
                                 }
                             });
                     });
+
+                if let Some(id) = single_upgrade_id {
+                    self.selected_winget_ids.insert(id.clone());
+                    self.spawn_upgrade_winget(vec![id]);
+                }
             }
         });
 

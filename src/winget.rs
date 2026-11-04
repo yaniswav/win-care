@@ -1,5 +1,5 @@
 use crate::runner::Runner;
-use crate::types::WingetUpgradeItem;
+use crate::types::{WingetPkgState, WingetUpgradeItem, WorkerEvent};
 
 /// Nettoie les séquences d'échappement ANSI pouvant être émises dans la console.
 fn strip_ansi(s: &str) -> String {
@@ -157,6 +157,7 @@ pub fn parse_winget_table(output: &str) -> Vec<WingetUpgradeItem> {
                 id,
                 current_version,
                 available_version,
+                state: WingetPkgState::Available,
             });
         }
     }
@@ -194,13 +195,82 @@ pub fn scan_winget_upgrades(runner: &Runner) -> Vec<WingetUpgradeItem> {
     items
 }
 
+/// Filtre et logge les lignes utiles de la sortie winget en ignorant les animations
+/// de spinners (- \ | /), les barres de progression ASCII et les pourcentages récurrents.
+fn log_filtered_winget_output(logger: &crate::logger::Logger, stdout: &str) {
+    for raw_line in stdout.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Ignorer les spinners isolés ou combinaisons d'espaces/spinners
+        if trimmed.len() <= 2 && trimmed.chars().all(|c| matches!(c, '-' | '\\' | '/' | '|' | ' ' | '\t')) {
+            continue;
+        }
+        // Ignorer les barres de progression de téléchargement WinGet (blocs ASCII ou pourcentages purs)
+        if trimmed.contains('█') || trimmed.contains('░') || trimmed.contains('▒') {
+            continue;
+        }
+        if trimmed.ends_with('%')
+            && trimmed
+                .chars()
+                .take(trimmed.len() - 1)
+                .all(|c| c.is_ascii_digit() || c.is_whitespace() || matches!(c, '-' | '\\' | '/' | '|'))
+        {
+            continue;
+        }
+        // Ignorer les lignes de tirets ou séparateurs purs
+        if trimmed.chars().all(|c| c == '-' || c == '=') && trimmed.len() >= 3 {
+            continue;
+        }
+        logger.info(trimmed);
+    }
+}
+
+/// Extrait un message court et compréhensible en cas d'échec de winget.
+fn extract_winget_error(exit_code: i32, stdout: &str, stderr: &str) -> String {
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    if combined.contains("en cours d'exécution") || combined.contains("is running") || combined.contains("in use") {
+        "Application en cours d'exécution".to_string()
+    } else if combined.contains("aucune mise à niveau applicable")
+        || combined.contains("no applicable update")
+        || combined.contains("déjà à jour")
+        || combined.contains("already installed")
+    {
+        "Déjà à jour ou introuvable".to_string()
+    } else if combined.contains("administrateur")
+        || combined.contains("administrator")
+        || combined.contains("elevation")
+        || combined.contains("privilege")
+    {
+        "Droits administrateur requis".to_string()
+    } else if combined.contains("hachage") || combined.contains("hash") {
+        "Échec de vérification du hachage".to_string()
+    } else if combined.contains("téléchargement") || combined.contains("download") {
+        "Échec du téléchargement".to_string()
+    } else if exit_code != 0 {
+        format!("Code d'erreur : {exit_code}")
+    } else {
+        "Échec de mise à jour".to_string()
+    }
+}
+
 /// Met à jour individuellement une sélection de paquets Winget par leurs identifiants.
-/// Respecte le mode dry_run du Runner.
+/// Respecte le mode dry_run du Runner et notifie l'UI en temps réel du statut de chaque paquet.
 /// Retourne le nombre de paquets mis à jour avec succès.
 pub fn upgrade_winget_packages(runner: &Runner, ids: &[String]) -> usize {
     runner
         .logger
         .section(format!("MISE À JOUR DE {} PAQUET(S) WINGET", ids.len()));
+
+    // Marque d'abord tous les paquets demandés en file d'attente
+    for id in ids {
+        runner.logger.send_event(WorkerEvent::WingetItemStatus {
+            id: id.clone(),
+            state: WingetPkgState::Queued,
+        });
+    }
+
     let mut success_count = 0;
 
     for (idx, id) in ids.iter().enumerate() {
@@ -208,16 +278,30 @@ pub fn upgrade_winget_packages(runner: &Runner, ids: &[String]) -> usize {
             runner
                 .logger
                 .warn("⏹ Mise à jour des paquets WinGet interrompue par l'utilisateur.");
+            for rem_id in &ids[idx..] {
+                runner.logger.send_event(WorkerEvent::WingetItemStatus {
+                    id: rem_id.clone(),
+                    state: WingetPkgState::Cancelled,
+                });
+            }
             break;
         }
+
+        runner.logger.send_event(WorkerEvent::WingetItemStatus {
+            id: id.clone(),
+            state: WingetPkgState::Upgrading("Téléchargement & installation en cours...".into()),
+        });
+
         runner.logger.progress(
             idx + 1,
             ids.len(),
-            format!("WinGet ({}/{}) : {}", idx + 1, ids.len(), id),
+            format!("[{}/{}] WinGet : installation de {}...", idx + 1, ids.len(), id),
         );
         runner
             .logger
-            .info(format!("[{}/{}] Mise à jour de {}", idx + 1, ids.len(), id));
+            .info(format!("[{}/{}] Lancement de la mise à jour pour {}", idx + 1, ids.len(), id));
+
+        // stream_to_log = false pour éviter le flood de spinners et barres ASCII
         let out = runner.run_action(
             "winget",
             &[
@@ -229,16 +313,57 @@ pub fn upgrade_winget_packages(runner: &Runner, ids: &[String]) -> usize {
                 "--accept-package-agreements",
                 "--accept-source-agreements",
             ],
-            true,
+            false,
         );
-        if out.success() {
-            runner.logger.success(format!("Mise à jour réussie : {id}"));
+
+        log_filtered_winget_output(&runner.logger, &out.stdout);
+        if !out.stderr.trim().is_empty() {
+            for err_line in out.stderr.lines() {
+                let t = err_line.trim();
+                if !t.is_empty() {
+                    runner.logger.warn(t);
+                }
+            }
+        }
+
+        if runner.is_cancelled() {
+            runner
+                .logger
+                .warn("⏹ Mise à jour interrompue pendant l'opération.");
+            for rem_id in &ids[idx..] {
+                runner.logger.send_event(WorkerEvent::WingetItemStatus {
+                    id: rem_id.clone(),
+                    state: WingetPkgState::Cancelled,
+                });
+            }
+            break;
+        }
+
+        if out.success() || out.exit_code == 3010 {
             success_count += 1;
-        } else {
-            runner.logger.warn(format!(
-                "Échec de mise à jour pour {id} (code de sortie {})",
-                out.exit_code
+            runner.logger.send_event(WorkerEvent::WingetItemStatus {
+                id: id.clone(),
+                state: WingetPkgState::Updated,
+            });
+            runner.logger.success(format!(
+                "✔ [{}/{}] {} mis à jour avec succès.",
+                idx + 1,
+                ids.len(),
+                id
             ));
+        } else {
+            let err_msg = extract_winget_error(out.exit_code, &out.stdout, &out.stderr);
+            runner.logger.warn(format!(
+                "⚠ [{}/{}] Échec pour {} ({})",
+                idx + 1,
+                ids.len(),
+                id,
+                err_msg
+            ));
+            runner.logger.send_event(WorkerEvent::WingetItemStatus {
+                id: id.clone(),
+                state: WingetPkgState::Failed(err_msg),
+            });
         }
     }
 
@@ -304,6 +429,7 @@ NVIDIA Nsight Compute 2025.2.1                         Nvidia.Nsight.Compute    
         assert_eq!(items[0].id, "Canva.Affinity");
         assert_eq!(items[0].current_version, "3.2.2.4557");
         assert_eq!(items[0].available_version, "3.3.3.5004");
+        assert_eq!(items[0].state, WingetPkgState::Available);
 
         assert_eq!(items[1].name, "Apple Mobile Device Support");
         assert_eq!(items[1].id, "Apple.AppleMobileDeviceSupport");
@@ -341,6 +467,13 @@ yt-dlp                                                 yt-dlp.yt-dlp            
         assert_eq!(items[1].id, "yt-dlp.yt-dlp");
         assert_eq!(items[1].current_version, "2026.03.17");
         assert_eq!(items[1].available_version, "2026.10.26");
+    }
+
+    #[test]
+    fn test_extract_winget_error() {
+        assert_eq!(extract_winget_error(0, "App is running right now", ""), "Application en cours d'exécution");
+        assert_eq!(extract_winget_error(-1978236885, "No applicable update found", ""), "Déjà à jour ou introuvable");
+        assert_eq!(extract_winget_error(1618, "", ""), "Code d'erreur : 1618");
     }
 
     #[test]
