@@ -10,7 +10,7 @@ use crate::types::{
 use eframe::egui::{self, Color32, RichText};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -174,7 +174,6 @@ pub struct WinCareApp {
     active_tab: ActiveTab,
 
     // Canal de communication avec les threads d'exécution
-    tx: Sender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
     is_busy: bool,
     progress_current: usize,
@@ -226,6 +225,8 @@ pub struct WinCareApp {
 
     // Onglet Restore
     restore_opts: RestoreOptions,
+    session_logger: Logger,
+    active_runner: std::sync::Arc<std::sync::Mutex<Option<Runner>>>,
 }
 
 struct TaskFinishedGuard {
@@ -286,7 +287,7 @@ impl WinCareApp {
 
         // Requêtes en arrière-plan au démarrage pour charger la configuration Gaming et la tâche planifiée
         {
-            let runner_init = Logger::new(Some(tx.clone()), false);
+            let runner_init = init_logger.clone();
             let r_init = Runner::new(runner_init, dry_run);
             std::thread::spawn(move || {
                 let status = crate::gaming::query_gaming_status(&r_init);
@@ -301,7 +302,6 @@ impl WinCareApp {
             dry_run,
             lang,
             active_tab: ActiveTab::Overview,
-            tx,
             rx,
             is_busy: false,
             progress_current: 0,
@@ -333,12 +333,29 @@ impl WinCareApp {
             weekly_task_enabled,
             update_info: None,
             restore_opts: RestoreOptions::default(),
+            session_logger: init_logger,
+            active_runner: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     fn make_runner(&self) -> Runner {
-        let logger = Logger::new(Some(self.tx.clone()), false);
-        Runner::new(logger, self.dry_run)
+        let r = Runner::new(self.session_logger.clone(), self.dry_run);
+        if let Ok(mut guard) = self.active_runner.lock() {
+            *guard = Some(r.clone());
+        }
+        r
+    }
+
+    fn cancel_current_task(&mut self) {
+        if let Ok(guard) = self.active_runner.lock() {
+            if let Some(r) = guard.as_ref() {
+                r.cancel();
+            }
+        }
+        self.progress_label = self
+            .lang
+            .tr("⏹ Cancelling current operation...", "⏹ Annulation de l'opération en cours...")
+            .to_string();
     }
 
     fn poll_events(&mut self) {
@@ -1670,11 +1687,37 @@ impl WinCareApp {
             } else {
                 1.0
             };
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .text(&self.progress_label)
-                    .animate(self.is_busy),
-            );
+            ui.horizontal(|ui| {
+                if self.is_busy {
+                    if ui
+                        .button(
+                            RichText::new(l.tr("⏹ Cancel", "⏹ Annuler"))
+                                .color(Color32::from_rgb(255, 110, 110))
+                                .strong(),
+                        )
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Cancel Active Operation", "Annuler l'opération en cours"),
+                                l.tr(
+                                    "Immediately stops the running command or WinGet upgrade.\n▪ Default: Task runs until completion.\n▪ If enabled: Terminates the active child process (e.g. winget.exe) and aborts remaining queued items.\n▪ If skipped: Operation continues normally.",
+                                    "Arrête immédiatement la commande ou la mise à jour WinGet en cours.\n▪ Par défaut : La tâche s'exécute jusqu'à la fin.\n▪ Si utilisé : Stoppe immédiatement le sous-processus actif (ex: winget.exe) et annule les éléments restants.\n▪ Si non utilisé : L'opération se poursuit normalement.",
+                                ),
+                                l.tr("✔ Safe immediate stop", "✔ Arrêt immédiat sécurisé"),
+                                true,
+                            );
+                        })
+                        .clicked()
+                    {
+                        self.cancel_current_task();
+                    }
+                }
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .text(&self.progress_label)
+                        .animate(self.is_busy),
+                );
+            });
         }
 
         if self.need_reboot_banner {
@@ -3482,6 +3525,56 @@ impl WinCareApp {
                     .clicked()
                 {
                     self.spawn_upgrade_all_winget();
+                }
+
+                if self.is_busy {
+                    if ui
+                        .button(
+                            RichText::new(l.tr("⏹ Stop Upgrade", "⏹ Annuler MAJ"))
+                                .color(Color32::from_rgb(255, 110, 110))
+                                .strong(),
+                        )
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Stop WinGet Upgrade", "Annuler les mises à jour WinGet"),
+                                l.tr(
+                                    "Aborts the ongoing WinGet upgrade immediately.\n▪ Default: Upgrades all selected packages sequentially.\n▪ If enabled: Kills the running winget.exe process and stops the upgrade queue.\n▪ If skipped: Continues upgrading remaining packages.",
+                                    "Interrompt immédiatement les mises à jour WinGet en cours.\n▪ Par défaut : Met à jour tous les paquets sélectionnés à la suite.\n▪ Si utilisé : Tue le processus winget.exe en cours et stoppe la file d'attente.\n▪ Si non utilisé : Poursuit la mise à jour des paquets restants.",
+                                ),
+                                l.tr("✔ Stops winget.exe immediately", "✔ Arrête winget.exe immédiatement"),
+                                true,
+                            );
+                        })
+                        .clicked()
+                    {
+                        self.cancel_current_task();
+                    }
+                }
+
+                if self.is_busy {
+                    if ui
+                        .button(
+                            RichText::new(l.tr("⏹ Stop Upgrade", "⏹ Annuler MAJ"))
+                                .color(Color32::from_rgb(255, 110, 110))
+                                .strong(),
+                        )
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Stop WinGet Upgrade", "Annuler les mises à jour WinGet"),
+                                l.tr(
+                                    "Aborts the ongoing WinGet upgrade immediately.\n▪ Default: Upgrades all selected packages sequentially.\n▪ If enabled: Kills the running winget.exe process and stops the upgrade queue.\n▪ If skipped: Continues upgrading remaining packages.",
+                                    "Interrompt immédiatement les mises à jour WinGet en cours.\n▪ Par défaut : Met à jour tous les paquets sélectionnés à la suite.\n▪ Si utilisé : Tue le processus winget.exe en cours et stoppe la file d'attente.\n▪ Si non utilisé : Poursuit la mise à jour des paquets restants.",
+                                ),
+                                l.tr("✔ Stops winget.exe immediately", "✔ Arrête winget.exe immédiatement"),
+                                true,
+                            );
+                        })
+                        .clicked()
+                    {
+                        self.cancel_current_task();
+                    }
                 }
 
                 if !self.winget_items.is_empty() {

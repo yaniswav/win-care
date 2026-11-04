@@ -2,6 +2,8 @@ use crate::logger::Logger;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -22,11 +24,42 @@ impl CommandOutput {
 pub struct Runner {
     pub logger: Logger,
     pub dry_run: bool,
+    pub cancelled: Arc<AtomicBool>,
+    pub active_child_pid: Arc<AtomicU32>,
 }
 
 impl Runner {
     pub fn new(logger: Logger, dry_run: bool) -> Self {
-        Self { logger, dry_run }
+        Self {
+            logger,
+            dry_run,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            active_child_pid: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// Indique si l'utilisateur a demandé l'annulation de la tâche en cours.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// Annule immédiatement la tâche en cours et tue l'arbre du sous-processus actif (ex: `winget.exe`).
+    pub fn cancel(&self) {
+        let was_already_cancelled = self.cancelled.swap(true, Ordering::SeqCst);
+        let pid = self.active_child_pid.swap(0, Ordering::SeqCst);
+        if pid != 0 {
+            let pid_str = pid.to_string();
+            let _ = Command::new("taskkill.exe")
+                .args(["/PID", &pid_str, "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        if !was_already_cancelled {
+            self.logger
+                .warn("⏹ Opération annulée par l'utilisateur (arrêt du processus en cours).");
+        }
     }
 
     /// Décode intelligemment la sortie brute d'un outil console Windows :
@@ -71,6 +104,13 @@ impl Runner {
 
     /// Exécute une commande de modification système (bloquée et simulée si `dry_run` est actif).
     pub fn run_action(&self, program: &str, args: &[&str], stream_to_log: bool) -> CommandOutput {
+        if self.is_cancelled() {
+            return CommandOutput {
+                exit_code: -2,
+                stdout: String::new(),
+                stderr: String::from("Cancelled"),
+            };
+        }
         let cmd_str = format!("{} {}", program, args.join(" "));
         if self.dry_run {
             self.logger
@@ -92,6 +132,13 @@ impl Runner {
         stdin_input: &str,
         stream_to_log: bool,
     ) -> CommandOutput {
+        if self.is_cancelled() {
+            return CommandOutput {
+                exit_code: -2,
+                stdout: String::new(),
+                stderr: String::from("Cancelled"),
+            };
+        }
         let cmd_str = format!(
             "echo {:?} | {} {}",
             stdin_input.trim(),
@@ -140,6 +187,13 @@ impl Runner {
         script: &str,
         stream_to_log: bool,
     ) -> CommandOutput {
+        if self.is_cancelled() {
+            return CommandOutput {
+                exit_code: -2,
+                stdout: String::new(),
+                stderr: String::from("Cancelled"),
+            };
+        }
         if self.dry_run {
             self.logger
                 .info(format!("[DRY-RUN] Action PowerShell simulée : {description}"));
@@ -174,6 +228,14 @@ impl Runner {
         stdin_data: Option<&str>,
         stream_to_log: bool,
     ) -> CommandOutput {
+        if self.is_cancelled() {
+            return CommandOutput {
+                exit_code: -2,
+                stdout: String::new(),
+                stderr: String::from("Cancelled"),
+            };
+        }
+
         let mut cmd = Command::new(program);
         cmd.args(args)
             .creation_flags(CREATE_NO_WINDOW)
@@ -200,6 +262,12 @@ impl Runner {
                 };
             }
         };
+
+        let child_pid = child.id();
+        self.active_child_pid.store(child_pid, Ordering::SeqCst);
+        if self.is_cancelled() {
+            self.cancel();
+        }
 
         if let Some(input) = stdin_data {
             if let Some(mut stdin) = child.stdin.take() {
@@ -242,6 +310,8 @@ impl Runner {
             .ok()
             .and_then(|st| st.code())
             .unwrap_or(-1);
+
+        self.active_child_pid.store(0, Ordering::SeqCst);
 
         CommandOutput {
             exit_code,

@@ -204,6 +204,17 @@ pub fn upgrade_winget_packages(runner: &Runner, ids: &[String]) -> usize {
     let mut success_count = 0;
 
     for (idx, id) in ids.iter().enumerate() {
+        if runner.is_cancelled() {
+            runner
+                .logger
+                .warn("⏹ Mise à jour des paquets WinGet interrompue par l'utilisateur.");
+            break;
+        }
+        runner.logger.progress(
+            idx + 1,
+            ids.len(),
+            format!("WinGet ({}/{}) : {}", idx + 1, ids.len(), id),
+        );
         runner
             .logger
             .info(format!("[{}/{}] Mise à jour de {}", idx + 1, ids.len(), id));
