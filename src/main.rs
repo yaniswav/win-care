@@ -172,7 +172,7 @@ fn main() {
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size([1120.0, 760.0])
+            .with_inner_size([1260.0, 780.0])
             .with_min_inner_size([880.0, 600.0])
             .with_icon(build_shield_icon()),
         ..Default::default()

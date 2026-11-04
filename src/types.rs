@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+pub fn deserialize_vec_or_one<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let val = serde_json::Value::deserialize(deserializer)?;
+    match val {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                if let Ok(v) = serde_json::from_value::<T>(item) {
+                    out.push(v);
+                }
+            }
+            Ok(out)
+        }
+        other => match serde_json::from_value::<T>(other) {
+            Ok(v) => Ok(vec![v]),
+            Err(_) => Ok(Vec::new()),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
     Info,
@@ -213,11 +237,16 @@ pub struct PcDiagnosis {
     pub ram_used_pct: f64,
     pub sys_free_gb: f64,
     pub ssd_detected: bool,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub disks: Vec<DiskVolumeInfo>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub top_processes: Vec<ProcessInfo>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub startup_items: Vec<StartupItem>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub auto_services: Vec<ServiceRamInfo>,
     pub scheduled_tasks_count: usize,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub caches: Vec<CacheSizeInfo>,
     pub cache_total_mb: u64,
 }
@@ -300,19 +329,23 @@ pub struct NetDiagnosis {
     pub media_type: String,
     pub link_speed: String,
     pub gateway: String,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub current_dns: Vec<String>,
     pub is_wifi: bool,
     pub wifi_signal_pct: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub wifi_info_lines: Vec<String>,
     pub ping_gw_ms: Option<f64>,
     pub ping_net_ms: Option<f64>,
     pub ping_loss_count: u32,
     pub uses_nextdns: bool,
     pub nextdns_mode: String,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub dns_results: Vec<DnsBenchResult>,
     pub best_dns: Option<DnsBenchResult>,
     pub current_mtu: u32,
     pub optimal_mtu: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub top_net_processes: Vec<NetProcInfo>,
     pub rx_mbps: f64,
     pub tx_mbps: f64,
@@ -435,6 +468,7 @@ pub struct BatteryAndSmartInfo {
     pub design_capacity_mwh: u64,
     pub full_charge_capacity_mwh: u64,
     pub battery_health_pct: f64,
+    #[serde(default, deserialize_with = "deserialize_vec_or_one")]
     pub smart_disks: Vec<SmartDiskHealth>,
 }
 
@@ -447,4 +481,79 @@ pub struct WinCareProfile {
     pub pc_optim: PcOptimOptions,
     pub net_optim: NetOptimOptions,
     pub debloat_applied_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_battery_and_smart_info_deserialize_variants() {
+        // 1. smart_disks = null
+        let json_null = r#"{
+            "has_battery": true,
+            "battery_name": "Internal Bat",
+            "design_capacity_mwh": 50000,
+            "full_charge_capacity_mwh": 48000,
+            "battery_health_pct": 96.0,
+            "smart_disks": null
+        }"#;
+        let res_null: BatteryAndSmartInfo = serde_json::from_str(json_null).expect("Failed to deserialize null smart_disks");
+        assert!(res_null.smart_disks.is_empty());
+
+        // 2. smart_disks = single object (PowerShell 5.1 ConvertTo-Json behavior)
+        let json_single = r#"{
+            "has_battery": true,
+            "battery_name": "Internal Bat",
+            "design_capacity_mwh": 50000,
+            "full_charge_capacity_mwh": 48000,
+            "battery_health_pct": 96.0,
+            "smart_disks": {
+                "friendly_name": "NVMe Samsung 980",
+                "media_type": "SSD",
+                "health_status": "Healthy",
+                "temperature_c": 35,
+                "wear_pct": 0,
+                "read_errors": 0,
+                "write_errors": 0
+            }
+        }"#;
+        let res_single: BatteryAndSmartInfo = serde_json::from_str(json_single).expect("Failed to deserialize single object smart_disks");
+        assert_eq!(res_single.smart_disks.len(), 1);
+        assert_eq!(res_single.smart_disks[0].friendly_name, "NVMe Samsung 980");
+        assert_eq!(res_single.smart_disks[0].media_type, "SSD");
+
+        // 3. smart_disks = array
+        let json_array = r#"{
+            "has_battery": true,
+            "battery_name": "Internal Bat",
+            "design_capacity_mwh": 50000,
+            "full_charge_capacity_mwh": 48000,
+            "battery_health_pct": 96.0,
+            "smart_disks": [
+                {
+                    "friendly_name": "Disk 0",
+                    "media_type": "SSD",
+                    "health_status": "Healthy",
+                    "temperature_c": 32,
+                    "wear_pct": 1,
+                    "read_errors": 0,
+                    "write_errors": 0
+                },
+                {
+                    "friendly_name": "Disk 1",
+                    "media_type": "HDD",
+                    "health_status": "Warning",
+                    "temperature_c": 40,
+                    "wear_pct": 10,
+                    "read_errors": 5,
+                    "write_errors": 2
+                }
+            ]
+        }"#;
+        let res_array: BatteryAndSmartInfo = serde_json::from_str(json_array).expect("Failed to deserialize array smart_disks");
+        assert_eq!(res_array.smart_disks.len(), 2);
+        assert_eq!(res_array.smart_disks[0].friendly_name, "Disk 0");
+        assert_eq!(res_array.smart_disks[1].friendly_name, "Disk 1");
+    }
 }

@@ -62,9 +62,10 @@ $disks = @(Get-PhysicalDisk -ErrorAction SilentlyContinue | ForEach-Object {
         return BatteryAndSmartInfo::default();
     }
 
-    let json_start = stdout.find('{').unwrap_or(0);
-    let json_end = stdout.rfind('}').map(|i| i + 1).unwrap_or(stdout.len());
-    let clean_json = &stdout[json_start..json_end];
+    let clean_json = match (stdout.find('{'), stdout.rfind('}')) {
+        (Some(start), Some(end)) if end >= start => &stdout[start..=end],
+        _ => stdout,
+    };
 
     let mut parsed_val: serde_json::Value = match serde_json::from_str(clean_json) {
         Ok(v) => v,

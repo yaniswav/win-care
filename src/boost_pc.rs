@@ -19,6 +19,7 @@ struct PsExtraDiag {
     #[serde(default)]
     ssd_present: bool,
     #[serde(default)]
+    #[serde(deserialize_with = "crate::types::deserialize_vec_or_one")]
     services: Vec<PsServiceRam>,
     #[serde(default)]
     tasks_count: usize,
@@ -864,27 +865,7 @@ pub fn run_pc_optimizations(runner: &Runner, opts: &PcOptimOptions, diag: &PcDia
             8,
             "Activation du plan d'alimentation Ultimate Performance...",
         );
-        let _ = runner.run_action(
-            "powercfg.exe",
-            &[
-                "/duplicatescheme",
-                "e9a42b02-d5df-448d-aa00-03f14749eb61",
-            ],
-            false,
-        );
-        let out = runner.run_action(
-            "powercfg.exe",
-            &[
-                "/setactive",
-                "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
-            ],
-            false,
-        );
-        if out.success() {
-            runner
-                .logger
-                .success("Plan d'alimentation 'Ultimate Performance' activé.");
-        }
+        crate::gaming::enable_ultimate_power_plan(runner);
     }
 
     // 3b. Effets visuels

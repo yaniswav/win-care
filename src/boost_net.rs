@@ -19,6 +19,7 @@ struct PsNetDiagPayload {
     physical_media_type: String,
     link_speed: String,
     gateway: String,
+    #[serde(default, deserialize_with = "crate::types::deserialize_vec_or_one")]
     current_dns: Vec<String>,
     current_mtu: u32,
     ping_gw_ms: Option<f64>,
@@ -26,7 +27,9 @@ struct PsNetDiagPayload {
     ping_loss_count: u32,
     uses_nextdns: bool,
     nextdns_mode: String,
+    #[serde(default, deserialize_with = "crate::types::deserialize_vec_or_one")]
     dns_results: Vec<DnsBenchResult>,
+    #[serde(default, deserialize_with = "crate::types::deserialize_vec_or_one")]
     top_net_processes: Vec<NetProcInfo>,
     rx_mbps: f64,
     tx_mbps: f64,
@@ -970,6 +973,17 @@ mod tests {
         assert_eq!(extract_percentage("    Signal                 : 88%"), Some(88));
         assert_eq!(extract_percentage("Signal : 100 %"), Some(100));
         assert_eq!(extract_percentage("SSID : MyBox"), None);
+    }
+
+    #[test]
+    fn test_ps_net_diag_payload_single_dns() {
+        let json_single = r#"{"if_index":1,"adapter_name":"Wi-Fi","current_dns":"192.168.1.1"}"#;
+        let payload: PsNetDiagPayload = serde_json::from_str(json_single).expect("Failed to deserialize single DNS string");
+        assert_eq!(payload.current_dns, vec!["192.168.1.1"]);
+
+        let json_null = r#"{"if_index":1,"adapter_name":"Wi-Fi","current_dns":null}"#;
+        let payload_null: PsNetDiagPayload = serde_json::from_str(json_null).expect("Failed to deserialize null DNS");
+        assert!(payload_null.current_dns.is_empty());
     }
 
     #[test]

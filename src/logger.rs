@@ -57,11 +57,10 @@ impl Logger {
             let _ = writeln!(std::io::stdout(), "{formatted}");
         }
 
-        if let Ok(mut guard) = self.log_file.lock() {
-            if let Some(f) = guard.as_mut() {
-                let _ = writeln!(f, "{formatted}");
-                let _ = f.flush();
-            }
+        let mut guard = self.log_file.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(f) = guard.as_mut() {
+            let _ = writeln!(f, "{formatted}");
+            let _ = f.flush();
         }
 
         let entry = LogEntry {

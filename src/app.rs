@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveTab {
     Overview,
     Repair,
@@ -228,6 +228,21 @@ pub struct WinCareApp {
     restore_opts: RestoreOptions,
 }
 
+struct TaskFinishedGuard {
+    runner: Runner,
+    title: String,
+    pub need_reboot: bool,
+}
+
+impl Drop for TaskFinishedGuard {
+    fn drop(&mut self) {
+        self.runner.logger.send_event(WorkerEvent::TaskFinished {
+            title: self.title.clone(),
+            need_reboot: self.need_reboot,
+        });
+    }
+}
+
 impl WinCareApp {
     pub fn new(ctx: &egui::Context, is_admin: bool, dry_run: bool) -> Self {
         configure_ui_and_fonts(ctx);
@@ -267,15 +282,17 @@ impl WinCareApp {
         let startup_items = crate::boost_pc::list_startup_items();
         let debloat_tweaks = crate::debloat::list_debloat_tweaks();
         let appx_items = crate::appx::get_default_bloatware_list();
-        let weekly_task_enabled = crate::scheduler::is_weekly_task_enabled();
+        let weekly_task_enabled = false;
 
-        // Requête en arrière-plan au démarrage pour charger la configuration Gaming
+        // Requêtes en arrière-plan au démarrage pour charger la configuration Gaming et la tâche planifiée
         {
             let runner_init = Logger::new(Some(tx.clone()), false);
             let r_init = Runner::new(runner_init, dry_run);
             std::thread::spawn(move || {
                 let status = crate::gaming::query_gaming_status(&r_init);
                 r_init.logger.send_event(WorkerEvent::GamingStatusReady(status));
+                let weekly_ok = crate::scheduler::is_weekly_task_enabled();
+                r_init.logger.send_event(WorkerEvent::WeeklyTaskStatusReady(weekly_ok));
             });
         }
 
@@ -418,10 +435,21 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = "Vérification des mises à jour sur GitHub...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Checking for updates on GitHub...",
+                "Vérification des mises à jour sur GitHub...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("GitHub Update Check", "Vérification MAJ GitHub").to_string(),
+                need_reboot: false,
+            };
             let info = crate::updater::check_for_update(&runner);
             if install_if_available {
                 if let Some(ref upd) = info {
@@ -433,10 +461,6 @@ impl WinCareApp {
             runner
                 .logger
                 .send_event(WorkerEvent::UpdateCheckReady(info));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Vérification MAJ GitHub".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -447,19 +471,26 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = "Création d'un Point de Restauration Windows...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Creating Windows System Restore Point...",
+                "Création d'un Point de Restauration Windows...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("System Restore Point", "Point de Restauration").to_string(),
+                need_reboot: false,
+            };
             let desc = format!(
                 "WinCare Backup ({})",
                 chrono::Local::now().format("%Y-%m-%d %H:%M")
             );
             crate::boost_pc::create_system_restore_point(&runner, &desc);
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Point de Restauration".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -470,16 +501,23 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = "Analyse des sous-dossiers les plus lourds dans %TEMP%...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Scanning largest %TEMP% subfolders...",
+                "Analyse des sous-dossiers les plus lourds dans %TEMP%...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("%TEMP% Analysis", "Analyse %TEMP%").to_string(),
+                need_reboot: false,
+            };
             let items = crate::boost_pc::scan_top_temp_folders(&runner);
             runner.logger.send_event(WorkerEvent::TempAnalysisReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Analyse %TEMP%".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -490,25 +528,37 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = paths.len();
-        self.progress_label = "Suppression des dossiers temporaires sélectionnés...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Deleting selected temporary folders...",
+                "Suppression des dossiers temporaires sélectionnés...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Targeted %TEMP% Purge", "Purge ciblée %TEMP%").to_string(),
+                need_reboot: false,
+            };
             let total = paths.len();
             for (idx, p) in paths.iter().enumerate() {
-                runner
-                    .logger
-                    .progress(idx + 1, total, format!("Suppression de {p}..."));
+                runner.logger.progress(
+                    idx + 1,
+                    total,
+                    l.tr(
+                        &format!("Deleting {p}..."),
+                        &format!("Suppression de {p}..."),
+                    ),
+                );
                 crate::boost_pc::delete_temp_target(&runner, p);
             }
             let updated = crate::boost_pc::scan_top_temp_folders(&runner);
             runner
                 .logger
                 .send_event(WorkerEvent::TempAnalysisReady(updated));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Purge ciblée %TEMP%".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -519,35 +569,56 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = 3;
-        self.progress_label = "Diagnostic complet en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Full diagnosis in progress...",
+                "Diagnostic complet en cours...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         let speedtest = self.include_speedtest;
         std::thread::spawn(move || {
-            runner
-                .logger
-                .progress(1, 3, "Analyse du PC (Hardware, RAM, Disques, Caches, Startup)...");
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Full Diagnosis", "Diagnostic complet").to_string(),
+                need_reboot: false,
+            };
+            runner.logger.progress(
+                1,
+                3,
+                l.tr(
+                    "Scanning PC (Hardware, RAM, Disks, Caches, Startup)...",
+                    "Analyse du PC (Hardware, RAM, Disques, Caches, Startup)...",
+                ),
+            );
             let pc = crate::boost_pc::run_pc_diagnosis(&runner);
             runner.logger.send_event(WorkerEvent::PcDiagnosisReady(pc));
 
-            runner
-                .logger
-                .progress(2, 3, "Identification des plus gros dossiers dans %TEMP%...");
+            runner.logger.progress(
+                2,
+                3,
+                l.tr(
+                    "Identifying largest folders in %TEMP%...",
+                    "Identification des plus gros dossiers dans %TEMP%...",
+                ),
+            );
             let top_temp = crate::boost_pc::scan_top_temp_folders(&runner);
             runner
                 .logger
                 .send_event(WorkerEvent::TempAnalysisReady(top_temp));
 
-            runner
-                .logger
-                .progress(3, 3, "Analyse de la connexion Internet (Route, Ping, DNS, MTU)...");
+            runner.logger.progress(
+                3,
+                3,
+                l.tr(
+                    "Analyzing Internet connection (Route, Ping, DNS, MTU)...",
+                    "Analyse de la connexion Internet (Route, Ping, DNS, MTU)...",
+                ),
+            );
             let net = crate::boost_net::run_net_diagnosis(&runner, speedtest);
             runner.logger.send_event(WorkerEvent::NetDiagnosisReady(net));
-
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Diagnostic complet".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -558,16 +629,24 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = tasks.len();
-        self.progress_label = "Réparation Windows en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Windows repair in progress...",
+                "Réparation Windows en cours...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let mut guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Windows Repair", "Réparation Windows").to_string(),
+                need_reboot: false,
+            };
             let need_reboot =
                 crate::repair::execute_repair_tasks(&runner, &tasks, schedule_chkdsk);
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Réparation Windows".to_string(),
-                need_reboot,
-            });
+            guard.need_reboot = need_reboot;
         });
     }
 
@@ -578,26 +657,41 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 2;
-        self.progress_label = "Analyse du PC en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr("PC diagnosis in progress...", "Analyse du PC en cours...")
+            .to_string();
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
-            runner.logger.progress(1, 2, "Diagnostic matériel & système...");
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("PC Diagnosis", "Diagnostic PC").to_string(),
+                need_reboot: false,
+            };
+            runner.logger.progress(
+                1,
+                2,
+                l.tr(
+                    "Hardware & system diagnosis...",
+                    "Diagnostic matériel & système...",
+                ),
+            );
             let diag = crate::boost_pc::run_pc_diagnosis(&runner);
             runner.logger.send_event(WorkerEvent::PcDiagnosisReady(diag));
 
-            runner
-                .logger
-                .progress(2, 2, "Scan des plus gros sous-dossiers %TEMP%...");
+            runner.logger.progress(
+                2,
+                2,
+                l.tr(
+                    "Scanning largest %TEMP% subfolders...",
+                    "Scan des plus gros sous-dossiers %TEMP%...",
+                ),
+            );
             let top_temp = crate::boost_pc::scan_top_temp_folders(&runner);
             runner
                 .logger
                 .send_event(WorkerEvent::TempAnalysisReady(top_temp));
-
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Diagnostic PC".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -608,7 +702,10 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = 4;
-        self.progress_label = "Boost PC en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr("PC Boost in progress...", "Boost PC en cours...")
+            .to_string();
 
         let runner = self.make_runner();
         let clean_opts = self.pc_clean_opts.clone();
@@ -616,26 +713,53 @@ impl WinCareApp {
         let existing_diag = self.pc_diag.clone();
 
         std::thread::spawn(move || {
-            runner.logger.progress(1, 4, "Mesure de l'état initial du PC...");
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("PC Boost", "Boost PC").to_string(),
+                need_reboot: false,
+            };
+            runner.logger.progress(
+                1,
+                4,
+                l.tr(
+                    "Measuring initial PC state...",
+                    "Mesure de l'état initial du PC...",
+                ),
+            );
             let before =
                 existing_diag.unwrap_or_else(|| crate::boost_pc::run_pc_diagnosis(&runner));
             runner
                 .logger
                 .send_event(WorkerEvent::PcDiagnosisReady(before.clone()));
 
-            runner
-                .logger
-                .progress(2, 4, "Nettoyage des caches et fichiers temporaires...");
+            runner.logger.progress(
+                2,
+                4,
+                l.tr(
+                    "Cleaning caches and temporary files...",
+                    "Nettoyage des caches et fichiers temporaires...",
+                ),
+            );
             crate::boost_pc::run_pc_cleaning(&runner, &clean_opts);
 
-            runner
-                .logger
-                .progress(3, 4, "Application des optimisations système...");
+            runner.logger.progress(
+                3,
+                4,
+                l.tr(
+                    "Applying system optimizations...",
+                    "Application des optimisations système...",
+                ),
+            );
             crate::boost_pc::run_pc_optimizations(&runner, &optim_opts, &before);
 
-            runner
-                .logger
-                .progress(4, 4, "Calcul du comparatif Avant / Après...");
+            runner.logger.progress(
+                4,
+                4,
+                l.tr(
+                    "Calculating Before / After comparison...",
+                    "Calcul du comparatif Avant / Après...",
+                ),
+            );
             let diffs = crate::boost_pc::compute_pc_comparison(&runner, &before);
             runner
                 .logger
@@ -648,11 +772,6 @@ impl WinCareApp {
             runner
                 .logger
                 .send_event(WorkerEvent::TempAnalysisReady(top_temp));
-
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Boost PC".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -663,17 +782,24 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = "Diagnostic réseau & DNS en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Network & DNS diagnosis in progress...",
+                "Diagnostic réseau & DNS en cours...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         let speedtest = self.include_speedtest;
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Internet Diagnosis", "Diagnostic Internet").to_string(),
+                need_reboot: false,
+            };
             let diag = crate::boost_net::run_net_diagnosis(&runner, speedtest);
             runner.logger.send_event(WorkerEvent::NetDiagnosisReady(diag));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Diagnostic Internet".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -684,7 +810,13 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = 3;
-        self.progress_label = "Optimisation Internet en cours...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Internet optimization in progress...",
+                "Optimisation Internet en cours...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         let optim_opts = self.net_optim_opts.clone();
@@ -692,22 +824,45 @@ impl WinCareApp {
         let speedtest = self.include_speedtest;
 
         std::thread::spawn(move || {
-            runner.logger.progress(1, 3, "Diagnostic réseau initial...");
+            let mut guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Boost Internet", "Boost Internet").to_string(),
+                need_reboot: false,
+            };
+            runner.logger.progress(
+                1,
+                3,
+                l.tr(
+                    "Initial network diagnosis...",
+                    "Diagnostic réseau initial...",
+                ),
+            );
             let before = existing_diag
                 .unwrap_or_else(|| crate::boost_net::run_net_diagnosis(&runner, speedtest));
             runner
                 .logger
                 .send_event(WorkerEvent::NetDiagnosisReady(before.clone()));
 
-            runner
-                .logger
-                .progress(2, 3, "Application des optimisations réseau...");
+            runner.logger.progress(
+                2,
+                3,
+                l.tr(
+                    "Applying network optimizations...",
+                    "Application des optimisations réseau...",
+                ),
+            );
             let need_reboot =
                 crate::boost_net::run_net_optimizations(&runner, &optim_opts, &before);
+            guard.need_reboot = need_reboot;
 
-            runner
-                .logger
-                .progress(3, 3, "Comparaison Avant / Après...");
+            runner.logger.progress(
+                3,
+                3,
+                l.tr(
+                    "Comparing Before / After...",
+                    "Comparaison Avant / Après...",
+                ),
+            );
             let diffs = crate::boost_net::compute_net_comparison(
                 &runner,
                 &before,
@@ -716,11 +871,6 @@ impl WinCareApp {
             runner
                 .logger
                 .send_event(WorkerEvent::NetComparisonReady(diffs));
-
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Boost Internet".to_string(),
-                need_reboot,
-            });
         });
     }
 
@@ -731,14 +881,28 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
+        let l = self.lang;
         self.progress_label = if recommended_only {
-            "Application du Pack Debloat Windows 11 Recommandé...".to_string()
+            l.tr(
+                "Applying Recommended Windows 11 Debloat Pack...",
+                "Application du Pack Debloat Windows 11 Recommandé...",
+            )
+            .to_string()
         } else {
-            "Restauration des paramètres Windows 11 par défaut...".to_string()
+            l.tr(
+                "Restoring Windows 11 default settings...",
+                "Restauration des paramètres Windows 11 par défaut...",
+            )
+            .to_string()
         };
 
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Windows 11 Debloat", "Debloat Windows 11").to_string(),
+                need_reboot: false,
+            };
             if recommended_only {
                 crate::debloat::apply_recommended_debloat(&runner);
             } else {
@@ -748,10 +912,6 @@ impl WinCareApp {
             runner
                 .logger
                 .send_event(WorkerEvent::DebloatListUpdated(updated));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Debloat Windows 11".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -762,7 +922,13 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = "Restauration des paramètres par défaut...".to_string();
+        let l = self.lang;
+        self.progress_label = l
+            .tr(
+                "Restoring default settings...",
+                "Restauration des paramètres par défaut...",
+            )
+            .to_string();
 
         let runner = self.make_runner();
         let opts = self.restore_opts.clone();
@@ -770,11 +936,12 @@ impl WinCareApp {
         let adapter_name = self.net_diag.as_ref().map(|d| d.adapter_name.clone());
 
         std::thread::spawn(move || {
-            crate::restore::execute_restore(&runner, &opts, if_index, adapter_name.as_deref());
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Restauration système".to_string(),
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("System Restore", "Restauration système").to_string(),
                 need_reboot: false,
-            });
+            };
+            crate::restore::execute_restore(&runner, &opts, if_index, adapter_name.as_deref());
         });
     }
 
@@ -783,8 +950,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr("Exporting profile...", "Exportation du profil...")
             .to_string();
         let runner = self.make_runner();
@@ -803,11 +970,12 @@ impl WinCareApp {
             debloat_applied_ids: applied_debloat,
         };
         std::thread::spawn(move || {
-            crate::profile::export_profile(&runner, &prof);
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Export profil".to_string(),
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Profile Export", "Export profil").to_string(),
                 need_reboot: false,
-            });
+            };
+            crate::profile::export_profile(&runner, &prof);
         });
     }
 
@@ -816,20 +984,21 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr("Importing profile...", "Importation du profil...")
             .to_string();
         let runner = self.make_runner();
         let default_path = crate::profile::default_profile_path();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Profile Import", "Import profil").to_string(),
+                need_reboot: false,
+            };
             if let Some(prof) = crate::profile::import_profile(&runner, &default_path) {
                 runner.logger.send_event(WorkerEvent::ProfileImported(prof));
             }
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Import profil".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -839,23 +1008,32 @@ impl WinCareApp {
         }
         self.is_busy = true;
         let target = !self.weekly_task_enabled;
+        let l = self.lang;
         self.progress_label = if target {
-            self.lang
-                .tr(
-                    "Activating weekly maintenance task...",
-                    "Activation de la tâche de maintenance hebdomadaire...",
-                )
-                .to_string()
+            l.tr(
+                "Activating weekly maintenance task...",
+                "Activation de la tâche de maintenance hebdomadaire...",
+            )
+            .to_string()
         } else {
-            self.lang
-                .tr(
-                    "Disabling weekly maintenance task...",
-                    "Désactivation de la tâche de maintenance hebdomadaire...",
-                )
-                .to_string()
+            l.tr(
+                "Disabling weekly maintenance task...",
+                "Désactivation de la tâche de maintenance hebdomadaire...",
+            )
+            .to_string()
         };
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr(
+                        "Weekly Maintenance Task",
+                        "Tâche de maintenance hebdomadaire",
+                    )
+                    .to_string(),
+                need_reboot: false,
+            };
             let ok = crate::scheduler::set_weekly_task(&runner, target);
             if ok {
                 runner
@@ -867,10 +1045,6 @@ impl WinCareApp {
                     .logger
                     .send_event(WorkerEvent::WeeklyTaskStatusReady(current));
             }
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Tâche de maintenance hebdomadaire".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -881,8 +1055,8 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Scanning for software upgrades via WinGet...",
                 "Recherche des mises à jour logicielles via WinGet...",
@@ -890,12 +1064,13 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("WinGet Scan", "Scan WinGet").to_string(),
+                need_reboot: false,
+            };
             let items = crate::winget::scan_winget_upgrades(&runner);
             runner.logger.send_event(WorkerEvent::WingetListReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Scan WinGet".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -906,8 +1081,8 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = ids.len();
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Upgrading selected packages via WinGet...",
                 "Mise à jour des paquets sélectionnés via WinGet...",
@@ -915,13 +1090,14 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("WinGet Upgrade", "Mise à jour WinGet").to_string(),
+                need_reboot: false,
+            };
             crate::winget::upgrade_winget_packages(&runner, &ids);
             let items = crate::winget::scan_winget_upgrades(&runner);
             runner.logger.send_event(WorkerEvent::WingetListReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Mise à jour WinGet".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -932,8 +1108,8 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Upgrading all packages via WinGet (--all --silent)...",
                 "Mise à jour globale de tous les logiciels via WinGet...",
@@ -941,13 +1117,16 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr("WinGet Upgrade All", "Mise à jour globale WinGet")
+                    .to_string(),
+                need_reboot: false,
+            };
             crate::winget::upgrade_all_winget(&runner);
             let items = crate::winget::scan_winget_upgrades(&runner);
             runner.logger.send_event(WorkerEvent::WingetListReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Mise à jour globale WinGet".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -958,8 +1137,8 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 1;
         self.progress_total = 1;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Scanning installed Windows AppX bloatware...",
                 "Analyse des Bloatwares Windows AppX installés...",
@@ -967,12 +1146,13 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("AppX Bloatware Scan", "Scan Bloatwares AppX").to_string(),
+                need_reboot: false,
+            };
             let items = crate::appx::scan_appx_bloatware(&runner);
             runner.logger.send_event(WorkerEvent::AppxListReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Scan Bloatwares AppX".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -983,8 +1163,8 @@ impl WinCareApp {
         self.is_busy = true;
         self.progress_current = 0;
         self.progress_total = patterns.len();
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Uninstalling selected Windows AppX bloatware...",
                 "Désinstallation des Bloatwares Windows AppX sélectionnés...",
@@ -992,13 +1172,16 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr("AppX Bloatware Removal", "Suppression Bloatwares AppX")
+                    .to_string(),
+                need_reboot: false,
+            };
             crate::appx::remove_appx_packages(&runner, &patterns);
             let items = crate::appx::scan_appx_bloatware(&runner);
             runner.logger.send_event(WorkerEvent::AppxListReady(items));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Suppression Bloatwares AppX".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1007,8 +1190,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Querying gaming configuration and shader caches...",
                 "Vérification des réglages gaming et caches shaders...",
@@ -1016,12 +1199,13 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Gaming Status", "État Gaming").to_string(),
+                need_reboot: false,
+            };
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "État Gaming".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1030,8 +1214,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Purging GPU shader caches (NVIDIA, AMD, DirectX)...",
                 "Purge des caches de shaders GPU (NVIDIA, AMD, DirectX)...",
@@ -1039,13 +1223,16 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr("GPU Shader Caches Purge", "Purge Caches Shaders GPU")
+                    .to_string(),
+                need_reboot: false,
+            };
             crate::gaming::clean_gpu_shader_caches(&runner);
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Purge Caches Shaders GPU".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1054,8 +1241,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Activating Ultimate Performance power scheme...",
                 "Activation du mode Performances Ultimes...",
@@ -1063,13 +1250,16 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr("Ultimate Performance Scheme", "Mode Performances Ultimes")
+                    .to_string(),
+                need_reboot: false,
+            };
             crate::gaming::enable_ultimate_power_plan(&runner);
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Mode Performances Ultimes".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1078,24 +1268,22 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
+        let l = self.lang;
         self.progress_label = if enabled {
-            self.lang
-                .tr("Enabling HAGS...", "Activation de HAGS...")
-                .to_string()
+            l.tr("Enabling HAGS...", "Activation de HAGS...").to_string()
         } else {
-            self.lang
-                .tr("Disabling HAGS...", "Désactivation de HAGS...")
-                .to_string()
+            l.tr("Disabling HAGS...", "Désactivation de HAGS...").to_string()
         };
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("HAGS Setting", "Réglage HAGS").to_string(),
+                need_reboot: true,
+            };
             crate::gaming::set_hags(&runner, enabled);
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Réglage HAGS".to_string(),
-                need_reboot: true,
-            });
         });
     }
 
@@ -1104,24 +1292,27 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
+        let l = self.lang;
         self.progress_label = if enabled {
-            self.lang
-                .tr("Enabling VBS...", "Activation de VBS...")
-                .to_string()
+            l.tr("Enabling VBS...", "Activation de VBS...").to_string()
         } else {
-            self.lang
-                .tr("Disabling VBS...", "Désactivation de VBS...")
-                .to_string()
+            l.tr("Disabling VBS...", "Désactivation de VBS...").to_string()
         };
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr(
+                        "VBS / Memory Integrity Setting",
+                        "Réglage VBS / Intégrité mémoire",
+                    )
+                    .to_string(),
+                need_reboot: true,
+            };
             crate::gaming::set_vbs(&runner, enabled);
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Réglage VBS / Intégrité mémoire".to_string(),
-                need_reboot: true,
-            });
         });
     }
 
@@ -1130,30 +1321,30 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
+        let l = self.lang;
         self.progress_label = if enabled {
-            self.lang
-                .tr(
-                    "Enabling Windows Game Mode...",
-                    "Activation du Mode Jeu Windows...",
-                )
-                .to_string()
+            l.tr(
+                "Enabling Windows Game Mode...",
+                "Activation du Mode Jeu Windows...",
+            )
+            .to_string()
         } else {
-            self.lang
-                .tr(
-                    "Disabling Windows Game Mode...",
-                    "Désactivation du Mode Jeu Windows...",
-                )
-                .to_string()
+            l.tr(
+                "Disabling Windows Game Mode...",
+                "Désactivation du Mode Jeu Windows...",
+            )
+            .to_string()
         };
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Windows Game Mode", "Mode Jeu Windows").to_string(),
+                need_reboot: false,
+            };
             crate::gaming::set_game_mode(&runner, enabled);
             let status = crate::gaming::query_gaming_status(&runner);
             runner.logger.send_event(WorkerEvent::GamingStatusReady(status));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Mode Jeu Windows".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1162,8 +1353,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Scanning battery health and disk S.M.A.R.T. counters...",
                 "Diagnostic de la santé batterie et compteurs S.M.A.R.T. disques...",
@@ -1171,12 +1362,15 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l
+                    .tr("Battery & S.M.A.R.T. Diagnosis", "Diagnostic Batterie & SMART")
+                    .to_string(),
+                need_reboot: false,
+            };
             let info = crate::hardware::scan_battery_and_smart(&runner);
             runner.logger.send_event(WorkerEvent::BatterySmartReady(info));
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Diagnostic Batterie & SMART".to_string(),
-                need_reboot: false,
-            });
         });
     }
 
@@ -1185,8 +1379,8 @@ impl WinCareApp {
             return;
         }
         self.is_busy = true;
-        self.progress_label = self
-            .lang
+        let l = self.lang;
+        self.progress_label = l
             .tr(
                 "Generating Windows battery report on Desktop...",
                 "Génération du rapport de batterie sur le Bureau...",
@@ -1194,11 +1388,12 @@ impl WinCareApp {
             .to_string();
         let runner = self.make_runner();
         std::thread::spawn(move || {
-            crate::hardware::generate_battery_report(&runner);
-            runner.logger.send_event(WorkerEvent::TaskFinished {
-                title: "Rapport de batterie".to_string(),
+            let _guard = TaskFinishedGuard {
+                runner: runner.clone(),
+                title: l.tr("Battery Report", "Rapport de batterie").to_string(),
                 need_reboot: false,
-            });
+            };
+            crate::hardware::generate_battery_report(&runner);
         });
     }
 
@@ -1391,7 +1586,7 @@ impl WinCareApp {
 
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.active_tab,
                 ActiveTab::Overview,
@@ -1493,7 +1688,25 @@ impl WinCareApp {
                     .color(Color32::from_rgb(255, 190, 60))
                     .strong(),
                 );
-                if ui.small_button(l.tr("Dismiss", "Masquer")).clicked() {
+                if ui
+                    .small_button(l.tr("Dismiss", "Masquer"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Dismiss Banner", "Masquer la bannière"),
+                            l.tr(
+                                "Hides the restart notification banner.\n▪ Default: Banner is visible while reboot is recommended.\n▪ If enabled: Closes the notification banner until next repair.\n▪ If skipped: Banner remains visible as a reminder.",
+                                "Masque le bandeau d'alerte de redémarrage.\n▪ Par défaut : Le bandeau est affiché tant qu'un redémarrage est conseillé.\n▪ Si utilisé : Ferme ce bandeau jusqu'à la prochaine opération.\n▪ Si non utilisé : Le bandeau reste affiché en rappel.",
+                            ),
+                            l.tr(
+                                "✔ Does not restart or alter Windows state",
+                                "✔ Ne modifie aucun paramètre de Windows",
+                            ),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     self.need_reboot_banner = false;
                 }
             });
@@ -1958,10 +2171,40 @@ impl WinCareApp {
                 "Réparation Windows (Interactif & Auto — Streaming Temps Réel)",
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(l.tr("Uncheck all", "Tout décocher")).clicked() {
+                if ui
+                    .button(l.tr("Uncheck all", "Tout décocher"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Uncheck All Repairs", "Tout décocher"),
+                            l.tr(
+                                "Clears the selection of all repair tasks.\n▪ Default: All repairs are selected.\n▪ If enabled: Deselects all repair tools so you can pick only specific ones.\n▪ If skipped: Keeps current selection intact.",
+                                "Désélectionne l'ensemble des tâches de réparation.\n▪ Par défaut : Toutes les réparations sont cochées.\n▪ Si utilisé : Décoche tous les outils afin de choisir uniquement les réparations souhaitées.\n▪ Si non utilisé : Conserve la sélection actuelle.",
+                            ),
+                            l.tr("✔ UI selection only, does not affect system", "✔ Modification d'affichage uniquement"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     self.selected_repairs.clear();
                 }
-                if ui.button(l.tr("Check all", "Tout cocher")).clicked() {
+                if ui
+                    .button(l.tr("Check all", "Tout cocher"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Check All Repairs", "Tout cocher"),
+                            l.tr(
+                                "Selects all 8 Windows system repair tasks.\n▪ Default: All repairs selected for complete health check.\n▪ If enabled: Re-selects DISM, SFC, Windows Update, Network, Store, Services and CHKDSK.\n▪ If skipped: Keeps current selection intact.",
+                                "Sélectionne l'ensemble des 8 outils de réparation système.\n▪ Par défaut : Toutes les réparations sont sélectionnées pour une remise en état complète.\n▪ Si utilisé : Recoche DISM, SFC, Windows Update, Réseau, Store, Services et CHKDSK.\n▪ Si non utilisé : Conserve la sélection actuelle.",
+                            ),
+                            l.tr("✔ UI selection only, does not affect system", "✔ Modification d'affichage uniquement"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     for t in RepairTask::ALL {
                         self.selected_repairs.insert(t);
                     }
@@ -1975,64 +2218,66 @@ impl WinCareApp {
         ui.add_space(6.0);
 
         for task in RepairTask::ALL {
-            let (short_label, subtitle, tooltip_body, tooltip_safety) = repair_task_text(l, task);
-            let mut checked = self.selected_repairs.contains(&task);
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    if checkbox_with_help(
-                        ui,
-                        &mut checked,
-                        &format!("[{}] {}", task.code(), short_label),
-                        short_label,
-                        tooltip_body,
-                        tooltip_safety,
-                        false,
-                    ) {
-                        if checked {
-                            self.selected_repairs.insert(task);
-                        } else {
-                            self.selected_repairs.remove(&task);
+            ui.push_id(task.code(), |ui| {
+                let (short_label, subtitle, tooltip_body, tooltip_safety) = repair_task_text(l, task);
+                let mut checked = self.selected_repairs.contains(&task);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        if checkbox_with_help(
+                            ui,
+                            &mut checked,
+                            &format!("[{}] {}", task.code(), short_label),
+                            short_label,
+                            tooltip_body,
+                            tooltip_safety,
+                            false,
+                        ) {
+                            if checked {
+                                self.selected_repairs.insert(task);
+                            } else {
+                                self.selected_repairs.remove(&task);
+                            }
                         }
-                    }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(!self.is_busy, egui::Button::new(l.tr("Run alone", "Exécuter seul")))
-                            .on_hover_text(l.tr(
-                                "Immediately runs only this repair task.",
-                                "Lance uniquement cette réparation tout de suite.",
-                            ))
-                            .clicked()
-                        {
-                            self.spawn_repair(vec![task], self.schedule_chkdsk_reboot);
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(!self.is_busy, egui::Button::new(l.tr("Run alone", "Exécuter seul")))
+                                .on_hover_text(l.tr(
+                                    "Immediately runs only this repair task.",
+                                    "Lance uniquement cette réparation tout de suite.",
+                                ))
+                                .clicked()
+                            {
+                                self.spawn_repair(vec![task], self.schedule_chkdsk_reboot);
+                            }
+                        });
                     });
-                });
-                ui.label(RichText::new(subtitle).weak());
+                    ui.label(RichText::new(subtitle).weak());
 
-                if task == RepairTask::Chkdsk {
-                    checkbox_with_help(
-                        ui,
-                        &mut self.schedule_chkdsk_reboot,
-                        l.tr(
-                            "Also schedule a full CHKDSK (chkdsk C: /F /R /X) upon next restart",
-                            "Planifier également un CHKDSK complet (chkdsk C: /F /R /X) au prochain redémarrage",
-                        ),
-                        l.tr(
-                            "Schedule CHKDSK /F /R /X on Next Reboot",
-                            "Planification CHKDSK /F /R /X au redémarrage",
-                        ),
-                        l.tr(
-                            "Schedules a deep integrity check of drive C: filesystem and bad sectors upon next Windows startup.",
-                            "Programme une vérification complète du système de fichiers et des secteurs physiques du disque C: lors du prochain démarrage de Windows.",
-                        ),
-                        l.tr(
-                            "⚠ Next PC boot will take 15 to 45 minutes while scanning the drive",
-                            "⚠ Le prochain démarrage du PC prendra 15 à 45 minutes pendant l'analyse du disque",
-                        ),
-                        true,
-                    );
-                }
+                    if task == RepairTask::Chkdsk {
+                        checkbox_with_help(
+                            ui,
+                            &mut self.schedule_chkdsk_reboot,
+                            l.tr(
+                                "Also schedule a full CHKDSK (chkdsk C: /F /R /X) upon next restart",
+                                "Planifier également un CHKDSK complet (chkdsk C: /F /R /X) au prochain redémarrage",
+                            ),
+                            l.tr(
+                                "Schedule CHKDSK /F /R /X on Next Reboot",
+                                "Planification CHKDSK /F /R /X au redémarrage",
+                            ),
+                            l.tr(
+                                "Schedules a deep integrity check of drive C: filesystem and bad sectors upon next Windows startup.\n▪ Default: No boot check scheduled (normal fast boot).\n▪ If enabled: Windows will scan drive C: at startup, fixing directory errors and recovering bad sectors.\n▪ If skipped: Drive C: is only checked online in read-only mode (scan).",
+                                "Programme une vérification complète du système de fichiers et des secteurs physiques du disque C: lors du prochain démarrage de Windows.\n▪ Par défaut : Aucun scan au boot (démarrage rapide préservé).\n▪ Si utilisé : Windows analysera et réparera le disque C: au démarrage, corrigeant les clusters défectueux.\n▪ Si non utilisé : Le disque C: est uniquement vérifié en ligne en lecture seule (scan).",
+                            ),
+                            l.tr(
+                                "⚠ Next PC boot will take 15 to 45 minutes while scanning the drive",
+                                "⚠ Le prochain démarrage du PC prendra 15 à 45 minutes pendant l'analyse du disque",
+                            ),
+                            true,
+                        );
+                    }
+                });
             });
         }
 
@@ -2056,6 +2301,18 @@ impl WinCareApp {
                             .strong(),
                     ),
                 )
+                .on_hover_ui(|ui| {
+                    show_rich_tooltip(
+                        ui,
+                        l.tr("Launch Windows Repairs", "Lancement des réparations Windows"),
+                        l.tr(
+                            "Executes all checked repair tasks in sequential order.\n▪ Default: Runs native Windows maintenance utilities (DISM, SFC, Windows Update, Store, Services, CHKDSK).\n▪ If enabled: Repairs corrupted system files, resets component store, and fixes system services.\n▪ If skipped: No repairs are executed.",
+                            "Exécute toutes les réparations cochées de manière séquentielle.\n▪ Par défaut : Lance les utilitaires officiels de maintenance Windows (DISM, SFC, Windows Update, Store, Services, CHKDSK).\n▪ Si utilisé : Répare les fichiers système corrompus, réinitialise le magasin des composants et relance les services vitaux.\n▪ Si non utilisé : Aucune réparation n'est effectuée.",
+                        ),
+                        l.tr("✔ Safe official Windows maintenance commands", "✔ Commandes officielles de maintenance Windows sans risque"),
+                        false,
+                    );
+                })
                 .clicked()
             {
                 self.spawn_repair(ordered, self.schedule_chkdsk_reboot);
@@ -2428,20 +2685,22 @@ impl WinCareApp {
 
                                 let items_snapshot = self.temp_subfolders.clone();
                                 for item in items_snapshot {
-                                    if ui
-                                        .add_enabled(
-                                            !self.is_busy,
-                                            egui::Button::new(l.tr("✕ Delete", "✕ Supprimer")),
-                                        )
-                                        .on_hover_text(format!(
-                                            "{}:\n{}",
-                                            l.tr("Delete only this temporary folder/file", "Supprimer uniquement le dossier/fichier temporaire"),
-                                            item.path
-                                        ))
-                                        .clicked()
-                                    {
-                                        self.spawn_delete_temp_paths(vec![item.path.clone()]);
-                                    }
+                                    ui.push_id(&item.path, |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                !self.is_busy,
+                                                egui::Button::new(l.tr("✕ Delete", "✕ Supprimer")),
+                                            )
+                                            .on_hover_text(format!(
+                                                "{}:\n{}",
+                                                l.tr("Delete only this temporary folder/file", "Supprimer uniquement le dossier/fichier temporaire"),
+                                                item.path
+                                            ))
+                                            .clicked()
+                                        {
+                                            self.spawn_delete_temp_paths(vec![item.path.clone()]);
+                                        }
+                                    });
                                     ui.label(&item.name).on_hover_text(&item.path);
                                     let size_txt = if item.size_mb >= 1024.0 {
                                         format!("{:.2} {}", item.size_mb / 1024.0, l.tr("GB", "Go"))
@@ -2512,51 +2771,53 @@ impl WinCareApp {
                                 } else {
                                     RichText::new("[OFF]").color(Color32::from_rgb(160, 160, 160))
                                 };
-                                if ui
-                                    .button(btn_text)
-                                    .on_hover_ui(|ui| {
-                                        show_rich_tooltip(
-                                            ui,
-                                            &format!("{}: {}", l.tr("Startup Program", "Programme au démarrage"), item.name),
-                                            &match l {
-                                                Lang::En => format!(
-                                                    "Command: {}\nSource: {}\n\n▪ Default: Application is registered to run automatically on Windows startup.\n▪ If enabled: Program launches automatically with Windows (ON).\n▪ If skipped: Program will not launch at boot (OFF), saving RAM and boot time.",
-                                                    item.command, item.source
+                                ui.push_id((&item.source, &item.name), |ui| {
+                                    if ui
+                                        .button(btn_text)
+                                        .on_hover_ui(|ui| {
+                                            show_rich_tooltip(
+                                                ui,
+                                                &format!("{}: {}", l.tr("Startup Program", "Programme au démarrage"), item.name),
+                                                &match l {
+                                                    Lang::En => format!(
+                                                        "Command: {}\nSource: {}\n\n▪ Default: Application is registered to run automatically on Windows startup.\n▪ If enabled: Program launches automatically with Windows (ON).\n▪ If skipped: Program will not launch at boot (OFF), saving RAM and boot time.",
+                                                        item.command, item.source
+                                                    ),
+                                                    Lang::Fr => format!(
+                                                        "Commande : {}\nSource : {}\n\n▪ Par défaut : L'application est configurée pour démarrer automatiquement avec Windows.\n▪ Si utilisé : Le programme se lance au démarrage de votre session (ON).\n▪ Si non utilisé : Le programme est désactivé au démarrage (OFF), accélérant le boot et économisant la RAM.",
+                                                        item.command, item.source
+                                                    ),
+                                                },
+                                                l.tr(
+                                                    "✔ Uses official Task Manager StartupApproved mechanism (no entry is deleted)",
+                                                    "✔ Utilise le mécanisme officiel StartupApproved du Gestionnaire des tâches (aucune entrée n'est supprimée)"
                                                 ),
-                                                Lang::Fr => format!(
-                                                    "Commande : {}\nSource : {}\n\n▪ Par défaut : L'application est configurée pour démarrer automatiquement avec Windows.\n▪ Si utilisé : Le programme se lance au démarrage de votre session (ON).\n▪ Si non utilisé : Le programme est désactivé au démarrage (OFF), accélérant le boot et économisant la RAM.",
-                                                    item.command, item.source
-                                                ),
-                                            },
-                                            l.tr(
-                                                "✔ Uses official Task Manager StartupApproved mechanism (no entry is deleted)",
-                                                "✔ Utilise le mécanisme officiel StartupApproved du Gestionnaire des tâches (aucune entrée n'est supprimée)"
-                                            ),
-                                            false,
-                                        );
-                                    })
-                                    .clicked()
-                                {
-                                    let runner = self.make_runner();
-                                    if crate::boost_pc::toggle_startup_item(
-                                        &runner,
-                                        &item,
-                                        !item.enabled,
-                                    ) {
-                                        if !self.dry_run {
-                                            self.startup_items =
-                                                crate::boost_pc::list_startup_items();
-                                        } else if let Some(existing) = self
-                                            .startup_items
-                                            .iter_mut()
-                                            .find(|i| {
-                                                i.name == item.name && i.source == item.source
-                                            })
-                                        {
-                                            existing.enabled = !existing.enabled;
+                                                false,
+                                            );
+                                        })
+                                        .clicked()
+                                    {
+                                        let runner = self.make_runner();
+                                        if crate::boost_pc::toggle_startup_item(
+                                            &runner,
+                                            &item,
+                                            !item.enabled,
+                                        ) {
+                                            if !self.dry_run {
+                                                self.startup_items =
+                                                    crate::boost_pc::list_startup_items();
+                                            } else if let Some(existing) = self
+                                                .startup_items
+                                                .iter_mut()
+                                                .find(|i| {
+                                                    i.name == item.name && i.source == item.source
+                                                })
+                                            {
+                                                existing.enabled = !existing.enabled;
+                                            }
                                         }
                                     }
-                                }
+                                });
                                 ui.label(&item.name).on_hover_text(&item.command);
                                 ui.label(RichText::new(&item.source).weak());
                                 ui.label(RichText::new(&item.command).weak());
@@ -3008,68 +3269,84 @@ impl WinCareApp {
                     .collect();
 
                 for tweak in snapshot {
-                    let (t_title, t_desc, t_safety) = debloat_tweak_text(l, &tweak.id)
-                        .unwrap_or((&tweak.title, &tweak.description, "✔ Safe Windows 11 registry setting"));
+                    ui.push_id(&tweak.id, |ui| {
+                        let (t_title, t_desc, t_safety) = debloat_tweak_text(l, &tweak.id)
+                            .unwrap_or((&tweak.title, &tweak.description, "✔ Safe Windows 11 registry setting"));
 
-                    let short_desc = if let Some(enabled_line) = t_desc.lines().find(|line| {
-                        line.starts_with("▪ If enabled:") || line.starts_with("▪ Si utilisé :") || line.starts_with("▪ Si utilisé:")
-                    }) {
-                        enabled_line
-                            .trim_start_matches("▪ If enabled:")
-                            .trim_start_matches("▪ Si utilisé :")
-                            .trim_start_matches("▪ Si utilisé:")
-                            .trim()
-                    } else if let Some(first_line) = t_desc.lines().next() {
-                        first_line
-                            .trim_start_matches("▪ Default:")
-                            .trim_start_matches("▪ Par défaut :")
-                            .trim_start_matches("▪ Par défaut:")
-                            .trim()
-                    } else {
-                        &tweak.description
-                    };
-
-                    ui.horizontal(|ui| {
-                        let btn_text = if tweak.is_applied {
-                            RichText::new(l.tr("✔ [ACTIVE]", "✔ [ACTIF]"))
-                                .color(Color32::from_rgb(80, 225, 130))
-                                .strong()
+                        let short_desc = if let Some(enabled_line) = t_desc.lines().find(|line| {
+                            line.starts_with("▪ If enabled:") || line.starts_with("▪ Si utilisé :") || line.starts_with("▪ Si utilisé:")
+                        }) {
+                            enabled_line
+                                .trim_start_matches("▪ If enabled:")
+                                .trim_start_matches("▪ Si utilisé :")
+                                .trim_start_matches("▪ Si utilisé:")
+                                .trim()
+                        } else if let Some(first_line) = t_desc.lines().next() {
+                            first_line
+                                .trim_start_matches("▪ Default:")
+                                .trim_start_matches("▪ Par défaut :")
+                                .trim_start_matches("▪ Par défaut:")
+                                .trim()
                         } else {
-                            RichText::new(l.tr("  [DEFAULT]  ", "  [PAR DÉFAUT]  "))
-                                .color(Color32::from_rgb(165, 165, 165))
+                            &tweak.description
                         };
 
-                        if ui
-                            .add_enabled(!self.is_busy, egui::Button::new(btn_text))
-                            .on_hover_ui(|ui| {
-                                show_rich_tooltip(
-                                    ui,
-                                    t_title,
-                                    t_desc,
-                                    t_safety,
-                                    false,
-                                );
-                            })
-                            .clicked()
-                        {
-                            let runner = self.make_runner();
-                            let target_state = !tweak.is_applied;
-                            if crate::debloat::set_debloat_tweak(&runner, &tweak.id, target_state) {
-                                if !self.dry_run {
-                                    self.debloat_tweaks = crate::debloat::list_debloat_tweaks();
-                                } else if let Some(item) = self
-                                    .debloat_tweaks
-                                    .iter_mut()
-                                    .find(|i| i.id == tweak.id)
-                                {
-                                    item.is_applied = target_state;
+                        ui.horizontal(|ui| {
+                            let btn_text = if tweak.is_applied {
+                                RichText::new(l.tr("✔ [ACTIVE]", "✔ [ACTIF]"))
+                                    .color(Color32::from_rgb(80, 225, 130))
+                                    .strong()
+                            } else {
+                                RichText::new(l.tr("  [DEFAULT]  ", "  [PAR DÉFAUT]  "))
+                                    .color(Color32::from_rgb(165, 165, 165))
+                            };
+
+                            if ui
+                                .add_enabled(!self.is_busy, egui::Button::new(btn_text))
+                                .on_hover_ui(|ui| {
+                                    show_rich_tooltip(
+                                        ui,
+                                        t_title,
+                                        t_desc,
+                                        t_safety,
+                                        false,
+                                    );
+                                })
+                                .clicked()
+                            {
+                                let runner = self.make_runner();
+                                let target_state = !tweak.is_applied;
+                                if crate::debloat::set_debloat_tweak(&runner, &tweak.id, target_state) {
+                                    if !self.dry_run {
+                                        self.debloat_tweaks = crate::debloat::list_debloat_tweaks();
+                                    } else if let Some(item) = self
+                                        .debloat_tweaks
+                                        .iter_mut()
+                                        .find(|i| i.id == tweak.id)
+                                    {
+                                        item.is_applied = target_state;
+                                    }
                                 }
                             }
-                        }
 
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(t_title).strong())
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(t_title).strong())
+                                        .on_hover_ui(|ui| {
+                                            show_rich_tooltip(
+                                                ui,
+                                                t_title,
+                                                t_desc,
+                                                t_safety,
+                                                false,
+                                            );
+                                        });
+                                    ui.label(
+                                        RichText::new("[?]")
+                                            .color(Color32::from_rgb(95, 195, 250))
+                                            .small()
+                                            .strong(),
+                                    )
                                     .on_hover_ui(|ui| {
                                         show_rich_tooltip(
                                             ui,
@@ -3079,42 +3356,28 @@ impl WinCareApp {
                                             false,
                                         );
                                     });
-                                ui.label(
-                                    RichText::new("[?]")
-                                        .color(Color32::from_rgb(95, 195, 250))
-                                        .small()
-                                        .strong(),
-                                )
-                                .on_hover_ui(|ui| {
-                                    show_rich_tooltip(
-                                        ui,
-                                        t_title,
-                                        t_desc,
-                                        t_safety,
-                                        false,
-                                    );
+                                    if tweak.recommended {
+                                        ui.label(
+                                            RichText::new(l.tr("(Recommended)", "(Recommandé)"))
+                                                .color(Color32::from_rgb(100, 200, 255))
+                                                .small(),
+                                        );
+                                    }
                                 });
-                                if tweak.recommended {
-                                    ui.label(
-                                        RichText::new(l.tr("(Recommended)", "(Recommandé)"))
-                                            .color(Color32::from_rgb(100, 200, 255))
-                                            .small(),
-                                    );
-                                }
+                                ui.label(RichText::new(short_desc).weak().small())
+                                    .on_hover_ui(|ui| {
+                                        show_rich_tooltip(
+                                            ui,
+                                            t_title,
+                                            t_desc,
+                                            t_safety,
+                                            false,
+                                        );
+                                    });
                             });
-                            ui.label(RichText::new(short_desc).weak().small())
-                                .on_hover_ui(|ui| {
-                                    show_rich_tooltip(
-                                        ui,
-                                        t_title,
-                                        t_desc,
-                                        t_safety,
-                                        false,
-                                    );
-                                });
                         });
+                        ui.add_space(2.0);
                     });
-                    ui.add_space(2.0);
                 }
             });
             ui.add_space(4.0);
@@ -3223,12 +3486,42 @@ impl WinCareApp {
 
                 if !self.winget_items.is_empty() {
                     ui.separator();
-                    if ui.small_button(l.tr("Select all", "Tout cocher")).clicked() {
+                    if ui
+                        .small_button(l.tr("Select all", "Tout cocher"))
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Select All Upgrades", "Tout cocher (Mises à jour)"),
+                                l.tr(
+                                    "Marks all outdated applications for upgrade.\n▪ Default: No software pre-selected.\n▪ If enabled: Selects all detected outdated applications to update them in one click.\n▪ If skipped: Only manually selected applications will be upgraded.",
+                                    "Sélectionne l'intégralité des applications obsolètes détectées.\n▪ Par défaut : Aucune application pré-sélectionnée.\n▪ Si utilisé : Coche tous les logiciels à mettre à jour en un clic.\n▪ Si non utilisé : Seules les applications cochées individuellement seront mises à jour.",
+                                ),
+                                l.tr("✔ Only updates detected outdated packages", "✔ Met à jour uniquement les paquets obsolètes"),
+                                false,
+                            );
+                        })
+                        .clicked()
+                    {
                         for item in &self.winget_items {
                             self.selected_winget_ids.insert(item.id.clone());
                         }
                     }
-                    if ui.small_button(l.tr("Deselect all", "Tout décocher")).clicked() {
+                    if ui
+                        .small_button(l.tr("Deselect all", "Tout décocher"))
+                        .on_hover_ui(|ui| {
+                            show_rich_tooltip(
+                                ui,
+                                l.tr("Deselect All Upgrades", "Tout décocher (Mises à jour)"),
+                                l.tr(
+                                    "Clears the upgrade selection.\n▪ Default: Cleared list.\n▪ If enabled: Unchecks every application in the upgrade list.\n▪ If skipped: Keeps current selection.",
+                                    "Efface la sélection de mise à jour.\n▪ Par défaut : Aucun paquet coché.\n▪ Si utilisé : Décoche tous les logiciels de la liste.\n▪ Si non utilisé : Conserve la sélection actuelle.",
+                                ),
+                                l.tr("✔ UI selection only", "✔ Modification d'affichage uniquement"),
+                                false,
+                            );
+                        })
+                        .clicked()
+                    {
                         self.selected_winget_ids.clear();
                     }
                 }
@@ -3259,13 +3552,44 @@ impl WinCareApp {
 
                                 for item in &self.winget_items {
                                     let mut is_selected = self.selected_winget_ids.contains(&item.id);
-                                    if ui.checkbox(&mut is_selected, "").changed() {
-                                        if is_selected {
-                                            self.selected_winget_ids.insert(item.id.clone());
-                                        } else {
-                                            self.selected_winget_ids.remove(&item.id);
+                                    let item_name = item.name.clone();
+                                    let item_id = item.id.clone();
+                                    let cur_ver = item.current_version.clone();
+                                    let avail_ver = item.available_version.clone();
+
+                                    ui.push_id(&item.id, |ui| {
+                                        if ui
+                                            .checkbox(&mut is_selected, "")
+                                            .on_hover_ui(|ui| {
+                                                show_rich_tooltip(
+                                                    ui,
+                                                    &item_name,
+                                                    &match l {
+                                                        Lang::En => format!(
+                                                            "ID: {}\n\n▪ Default: Keeps current version ({})\n▪ If enabled: Upgrades application to latest release ({})\n▪ If skipped: Retains current installed build without updating",
+                                                            item_id, cur_ver, avail_ver
+                                                        ),
+                                                        Lang::Fr => format!(
+                                                            "Identifiant : {}\n\n▪ Par défaut : Conserve la version actuelle ({})\n▪ Si utilisé : Met à jour l'application vers la dernière version ({})\n▪ Si non utilisé : L'application n'est pas mise à jour et reste dans sa version actuelle",
+                                                            item_id, cur_ver, avail_ver
+                                                        ),
+                                                    },
+                                                    l.tr(
+                                                        "✔ Official WinGet package upgrade",
+                                                        "✔ Mise à jour officielle via le dépôt WinGet",
+                                                    ),
+                                                    false,
+                                                );
+                                            })
+                                            .changed()
+                                        {
+                                            if is_selected {
+                                                self.selected_winget_ids.insert(item.id.clone());
+                                            } else {
+                                                self.selected_winget_ids.remove(&item.id);
+                                            }
                                         }
-                                    }
+                                    });
                                     ui.label(RichText::new(&item.name).strong());
                                     ui.label(RichText::new(&item.id).weak());
                                     ui.label(&item.current_version);
@@ -3347,19 +3671,70 @@ impl WinCareApp {
                 }
 
                 ui.separator();
-                if ui.small_button(l.tr("Select installed", "Cocher installés")).clicked() {
+                if ui
+                    .small_button(l.tr("Select installed", "Cocher installés"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Select Installed Bloatware", "Cocher les bloatwares installés"),
+                            l.tr(
+                                "Selects only the pre-installed bloatware packages currently detected on the system.\n▪ Default: Unchecked until detected.\n▪ If enabled: Checks all packages marked as [Installed] for removal.\n▪ If skipped: Selection remains unchanged.",
+                                "Sélectionne uniquement les bloatwares actuellement détectés comme installés sur la machine.\n▪ Par défaut : Non coché tant que non détecté.\n▪ Si utilisé : Coche tous les paquets marqués comme [Installé] pour suppression.\n▪ Si non utilisé : La sélection reste inchangée.",
+                            ),
+                            l.tr(
+                                "✔ Targets only installed bloatware",
+                                "✔ Cible uniquement les applications réellement présentes",
+                            ),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     for item in &self.appx_items {
                         if item.installed {
                             self.selected_appx_patterns.insert(item.package_pattern.clone());
                         }
                     }
                 }
-                if ui.small_button(l.tr("Select all", "Tout cocher")).clicked() {
+                if ui
+                    .small_button(l.tr("Select all", "Tout cocher"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Select All Bloatware", "Tout cocher (Bloatwares)"),
+                            l.tr(
+                                "Selects all 14 catalog bloatware packages for removal and de-provisioning.\n▪ Default: Nothing selected.\n▪ If enabled: All catalog packages are selected.\n▪ If skipped: Selection remains unchanged.",
+                                "Sélectionne la totalité des 14 bloatwares du catalogue pour suppression et dé-provisionnement.\n▪ Par défaut : Rien n'est sélectionné.\n▪ Si utilisé : Tous les bloatwares du catalogue sont sélectionnés.\n▪ Si non utilisé : La sélection reste inchangée.",
+                            ),
+                            l.tr(
+                                "✔ Safe Windows 11 bloatware catalog",
+                                "✔ Catalogue de bloatwares Windows 11 sans risque",
+                            ),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     for item in &self.appx_items {
                         self.selected_appx_patterns.insert(item.package_pattern.clone());
                     }
                 }
-                if ui.small_button(l.tr("Deselect all", "Tout décocher")).clicked() {
+                if ui
+                    .small_button(l.tr("Deselect all", "Tout décocher"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Deselect All Bloatware", "Tout décocher (Bloatwares)"),
+                            l.tr(
+                                "Clears all bloatware checkboxes.\n▪ Default: Empty selection.\n▪ If enabled: Unchecks all packages.\n▪ If skipped: Keeps current selection.",
+                                "Décoche tous les bloatwares de la liste.\n▪ Par défaut : Sélection vide.\n▪ Si utilisé : Décoche tous les paquets.\n▪ Si non utilisé : Conserve la sélection actuelle.",
+                            ),
+                            l.tr("✔ UI selection only", "✔ Modification d'affichage uniquement"),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     self.selected_appx_patterns.clear();
                 }
             });
@@ -3382,13 +3757,34 @@ impl WinCareApp {
 
                             for item in &self.appx_items {
                                 let mut is_selected = self.selected_appx_patterns.contains(&item.package_pattern);
-                                if ui.checkbox(&mut is_selected, "").changed() {
-                                    if is_selected {
-                                        self.selected_appx_patterns.insert(item.package_pattern.clone());
-                                    } else {
-                                        self.selected_appx_patterns.remove(&item.package_pattern);
+                                let item_title = &item.display_name;
+                                let details = match l {
+                                    Lang::En => format!(
+                                        "▪ Default: Pre-installed with Windows 10/11.\n▪ If enabled: Completely removes {} from the system and disables automated provisioning.\n▪ If skipped: Retains the application on the system.",
+                                        item.display_name
+                                    ),
+                                    Lang::Fr => format!(
+                                        "▪ Par défaut : Préinstallé avec Windows 10/11.\n▪ Si utilisé : Supprime complètement {} du système et empêche son approvisionnement automatique.\n▪ Si non utilisé : Conserve l'application sur le système.",
+                                        item.display_name
+                                    ),
+                                };
+                                let safety = l.tr("✔ Can be reinstalled from Microsoft Store if ever needed", "✔ Réinstallable depuis le Microsoft Store si nécessaire");
+
+                                ui.push_id(&item.package_pattern, |ui| {
+                                    if ui
+                                        .checkbox(&mut is_selected, "")
+                                        .on_hover_ui(|ui| {
+                                            show_rich_tooltip(ui, item_title, &details, safety, false);
+                                        })
+                                        .changed()
+                                    {
+                                        if is_selected {
+                                            self.selected_appx_patterns.insert(item.package_pattern.clone());
+                                        } else {
+                                            self.selected_appx_patterns.remove(&item.package_pattern);
+                                        }
                                     }
-                                }
+                                });
 
                                 ui.label(RichText::new(&item.display_name).strong());
 
@@ -3405,23 +3801,12 @@ impl WinCareApp {
                                 };
                                 ui.label(desc);
 
-                                let item_title = &item.display_name;
-                                let details = match l {
-                                    Lang::En => format!(
-                                        "▪ Default: Pre-installed with Windows 10/11.\n▪ If enabled: Completely removes {} from the system and disables automated provisioning.\n▪ If skipped: Retains the application on the system.",
-                                        item.display_name
-                                    ),
-                                    Lang::Fr => format!(
-                                        "▪ Par défaut : Préinstallé avec Windows 10/11.\n▪ Si utilisé : Supprime complètement {} du système et empêche son approvisionnement automatique.\n▪ Si non utilisé : Conserve l'application sur le système.",
-                                        item.display_name
-                                    ),
-                                };
-                                let safety = l.tr("✔ Can be reinstalled from Microsoft Store if ever needed", "✔ Réinstallable depuis le Microsoft Store si nécessaire");
-
-                                ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
-                                    .on_hover_ui(|ui| {
-                                        show_rich_tooltip(ui, item_title, &details, safety, false);
-                                    });
+                                ui.push_id(&item.package_pattern, |ui| {
+                                    ui.label(RichText::new("[?]").color(Color32::from_rgb(95, 195, 250)).small().strong())
+                                        .on_hover_ui(|ui| {
+                                            show_rich_tooltip(ui, item_title, &details, safety, false);
+                                        });
+                                });
 
                                 ui.end_row();
                             }
@@ -3626,8 +4011,8 @@ impl WinCareApp {
                             ui,
                             l.tr("VBS / Core Isolation (Virtualization-Based Security)", "VBS / Isolation du noyau (Virtualization-Based Security)"),
                             l.tr(
-                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled (VBS OFF): Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped (VBS ON): Keeps Microsoft virtualization security active for maximum enterprise security.",
-                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si désactivé (VBS OFF) : Libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si activé (VBS ON) : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
+                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled: Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped: Keeps Microsoft virtualization security active for maximum enterprise security.",
+                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si utilisé : La désactivation de VBS libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si non utilisé : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
                             ),
                             l.tr("⚠ Major FPS impact in gaming vs enterprise security trade-off. Requires reboot.", "⚠ Compromis FPS en jeu vs protection entreprise. Nécessite un redémarrage."),
                             true,
@@ -3644,8 +4029,8 @@ impl WinCareApp {
                             ui,
                             l.tr("VBS / Core Isolation (Virtualization-Based Security)", "VBS / Isolation du noyau (Virtualization-Based Security)"),
                             l.tr(
-                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled (VBS OFF): Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped (VBS ON): Keeps Microsoft virtualization security active for maximum enterprise security.",
-                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si désactivé (VBS OFF) : Libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si activé (VBS ON) : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
+                                "▪ Default: Windows 11 enables Virtualization-Based Security and Hypervisor-Enforced Code Integrity (HVCI) by default.\n▪ If enabled: Disabling VBS frees hypervisor CPU overhead, providing a 5% to 15% FPS boost in CPU-heavy games, but lowers kernel exploit mitigation defenses.\n▪ If skipped: Keeps Microsoft virtualization security active for maximum enterprise security.",
+                                "▪ Par défaut : Windows 11 active par défaut la sécurité basée sur la virtualisation et l'intégrité de la mémoire (HVCI).\n▪ Si utilisé : La désactivation de VBS libère la surcharge de l'hyperviseur CPU, offrant un gain de 5 % à 15 % de FPS dans les jeux gourmands en processeur, mais réduit l'isolation de sécurité du noyau.\n▪ Si non utilisé : Conserve la sécurité renforcée Microsoft contre les exploits noyau avancés.",
                             ),
                             l.tr("⚠ Major FPS impact in gaming vs enterprise security trade-off. Requires reboot.", "⚠ Compromis FPS en jeu vs protection entreprise. Nécessite un redémarrage."),
                             true,
@@ -4113,10 +4498,43 @@ impl WinCareApp {
             )).strong());
             ui.label(RichText::new(format!("({})", self.log_file_path.display())).weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button(l.tr("Clear", "Effacer")).clicked() {
+                if ui
+                    .small_button(l.tr("Clear", "Effacer"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Clear Console", "Effacer la console"),
+                            l.tr(
+                                "Clears all displayed log messages from the UI view.\n▪ Default: Log history is retained in memory.\n▪ If enabled: Clears current console display (the file on disk is preserved).\n▪ If skipped: Keeps existing log history displayed.",
+                                "Efface tous les messages du journal affichés dans la fenêtre.\n▪ Par défaut : L'historique des logs reste visible.\n▪ Si utilisé : Vide l'affichage de la console (le fichier journal sur disque reste intact).\n▪ Si non utilisé : Conserve l'affichage actuel du journal.",
+                            ),
+                            l.tr(
+                                "✔ Console display only, does not delete log file",
+                                "✔ Affichage console uniquement, le fichier journal n'est pas supprimé",
+                            ),
+                            false,
+                        );
+                    })
+                    .clicked()
+                {
                     self.logs.clear();
                 }
-                ui.checkbox(&mut self.auto_scroll_logs, l.tr("Auto-scroll", "Défilement auto"));
+                ui.checkbox(&mut self.auto_scroll_logs, l.tr("Auto-scroll", "Défilement auto"))
+                    .on_hover_ui(|ui| {
+                        show_rich_tooltip(
+                            ui,
+                            l.tr("Auto-scroll Console", "Défilement automatique"),
+                            l.tr(
+                                "Automatically scrolls down to latest received log messages.\n▪ Default: Enabled for live command tracking.\n▪ If enabled: Console automatically follows newest log output.\n▪ If skipped: Scroll position remains fixed to let you read earlier lines.",
+                                "Fait défiler automatiquement la vue vers les derniers messages reçus.\n▪ Par défaut : Activé pour suivre l'exécution en direct.\n▪ Si utilisé : La console suit automatiquement les nouvelles lignes émises.\n▪ Si non utilisé : La position de lecture reste fixe pour vous permettre de lire les messages précédents.",
+                            ),
+                            l.tr(
+                                "✔ Real-time console view setting",
+                                "✔ Réglage d'affichage de la console",
+                            ),
+                            false,
+                        );
+                    });
             });
         });
         ui.separator();
@@ -4189,7 +4607,7 @@ impl eframe::App for WinCareApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
-                .id_salt("main_tab_scroll")
+                .id_salt(("main_tab_scroll", self.active_tab))
                 .show(ui, |ui| match self.active_tab {
                     ActiveTab::Overview => self.render_overview_tab(ui),
                     ActiveTab::Repair => self.render_repair_tab(ui),
@@ -4257,5 +4675,39 @@ mod tests {
         assert_eq!(c3, Color32::from_rgb(235, 190, 110));
 
         assert!(parse_tooltip_line("Regular line").is_none());
+    }
+
+    #[test]
+    fn test_active_tab_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ActiveTab::Overview);
+        set.insert(ActiveTab::Repair);
+        assert!(set.contains(&ActiveTab::Overview));
+        assert!(!set.contains(&ActiveTab::GamingHardware));
+    }
+
+    #[test]
+    fn test_task_finished_guard_drop() {
+        let (tx, rx) = mpsc::channel();
+        let logger = Logger::new(Some(tx), false);
+        let runner = Runner::new(logger, false);
+
+        {
+            let _guard = TaskFinishedGuard {
+                runner,
+                title: "Test Task".to_string(),
+                need_reboot: true,
+            };
+        }
+
+        let event = rx.try_recv().expect("Event should have been sent on guard drop");
+        match event {
+            WorkerEvent::TaskFinished { title, need_reboot } => {
+                assert_eq!(title, "Test Task");
+                assert!(need_reboot);
+            }
+            _ => panic!("Expected TaskFinished event"),
+        }
     }
 }
