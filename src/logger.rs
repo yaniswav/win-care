@@ -6,35 +6,19 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-/// Détermine et crée le dossier dédié aux fichiers journaux (`logs/`).
-/// - Si l'exécutable se trouve dans un dossier dédié (hors `Desktop` et hors `target\`), utilise `<dossier_exe>\logs`.
-/// - Sinon, utilise `%LOCALAPPDATA%\WinCare\logs`.
+/// Retourne le dossier standard d'application Windows `%LOCALAPPDATA%\WinCare\logs`
+/// (`C:\Users\<User>\AppData\Local\WinCare\logs`) afin de ne jamais créer de dossier à côté du `.exe`.
 pub fn resolve_logs_dir() -> PathBuf {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let parent_str = parent.to_string_lossy().to_lowercase();
-            let is_desktop = parent_str.ends_with("\\desktop") || parent_str.ends_with("/desktop");
-            let is_cargo_target =
-                parent_str.contains("\\target\\debug") || parent_str.contains("\\target\\release");
-
-            if !is_desktop && !is_cargo_target {
-                let dir = parent.join("logs");
-                if fs::create_dir_all(&dir).is_ok() {
-                    return dir;
-                }
-            }
-        }
-    }
-
-    let base = std::env::var("LOCALAPPDATA")
+    let dir = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("APPDATA"))
         .map(|p| PathBuf::from(p).join("WinCare").join("logs"))
-        .unwrap_or_else(|_| PathBuf::from("logs"));
-    let _ = fs::create_dir_all(&base);
-    base
+        .unwrap_or_else(|_| std::env::temp_dir().join("WinCare").join("logs"));
+    let _ = fs::create_dir_all(&dir);
+    dir
 }
 
 /// Conserve uniquement les `max_files` fichiers `.log` les plus récents dans `log_dir`.
-fn rotate_old_logs(log_dir: & std::path::Path, max_files: usize) {
+fn rotate_old_logs(log_dir: &std::path::Path, max_files: usize) {
     let Ok(entries) = fs::read_dir(log_dir) else {
         return;
     };
